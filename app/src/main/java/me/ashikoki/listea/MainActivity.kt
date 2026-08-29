@@ -25,6 +25,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,9 +57,40 @@ class MainActivity : ComponentActivity() {
         setContent {
             ListeaTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    FolderScreen(modifier = Modifier.padding(innerPadding))
+                    ListeaApp(modifier = Modifier.padding(innerPadding))
                 }
             }
+        }
+    }
+}
+
+private enum class MainTab(val label: String) { Folder("Folder"), Lists("Lists") }
+
+/** Top level of the app: the app name, a Folder/Lists switch, and the selected screen. */
+@Composable
+fun ListeaApp(modifier: Modifier = Modifier) {
+    var tab by rememberSaveable { mutableStateOf(MainTab.Folder) }
+
+    Column(modifier.fillMaxSize()) {
+        Text(
+            text = "Listea",
+            style = MaterialTheme.typography.headlineMedium,
+            modifier = Modifier.padding(horizontal = 16.dp)
+        )
+        Spacer(Modifier.height(8.dp))
+        PrimaryTabRow(selectedTabIndex = tab.ordinal) {
+            MainTab.entries.forEach { entry ->
+                Tab(
+                    selected = tab == entry,
+                    onClick = { tab = entry },
+                    text = { Text(entry.label) }
+                )
+            }
+        }
+        val screenModifier = Modifier.weight(1f).padding(16.dp)
+        when (tab) {
+            MainTab.Folder -> FolderScreen(modifier = screenModifier)
+            MainTab.Lists -> ListsScreen(modifier = screenModifier)
         }
     }
 }
@@ -165,10 +199,7 @@ fun FolderScreen(modifier: Modifier = Modifier) {
         browsing?.let { open(it.stack.dropLast(1)) }
     }
 
-    Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
-        Text(text = "Listea", style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(16.dp))
-
+    Column(modifier = modifier.fillMaxSize()) {
         when (val current = state) {
             is FolderUiState.Loading -> CircularProgressIndicator()
 
