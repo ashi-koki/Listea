@@ -10,7 +10,17 @@ data class ListEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val title: String,
     val createdAt: Long,
-    val completedAt: Long? = null
+    val completedAt: Long? = null,
+
+    /** Optional completion action: one POST webhook. Only fires when enabled and the URL is valid. */
+    val webhookEnabled: Boolean = false,
+    val webhookUrl: String = "",
+
+    /** Lightweight record of the last attempt, so the UI can show never sent / success / failed. */
+    val lastDeliveryAt: Long? = null,
+    val lastDeliveryStatus: String? = null,
+    val lastDeliveryCode: Int? = null,
+    val lastDeliveryError: String? = null
 )
 
 @Entity(

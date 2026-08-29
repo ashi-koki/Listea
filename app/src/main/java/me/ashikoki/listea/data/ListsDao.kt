@@ -45,9 +45,14 @@ abstract class ListsDao {
     /**
      * Appends an item and re-evaluates completion: adding an item to an already complete list
      * makes it incomplete again.
+     *
+     * Returns true when this edit moved the list from incomplete to complete. The before/after
+     * reads happen inside the same transaction as the write, so concurrent edits cannot both
+     * observe the transition, and the caller can fire the completion action exactly once.
      */
     @Transaction
-    open suspend fun addItem(listId: Long, title: String, now: Long) {
+    open suspend fun addItem(listId: Long, title: String, now: Long): Boolean {
+        val wasComplete = isComplete(listId) == true
         insertItem(
             ListItemEntity(
                 listId = listId,
@@ -57,19 +62,61 @@ abstract class ListsDao {
             )
         )
         refreshCompletion(listId, now)
+        return !wasComplete && isComplete(listId) == true
     }
 
+    /** Returns true when checking this item completed the list. See [addItem]. */
     @Transaction
-    open suspend fun setItemCompleted(listId: Long, itemId: Long, completed: Boolean, now: Long) {
+    open suspend fun setItemCompleted(
+        listId: Long,
+        itemId: Long,
+        completed: Boolean,
+        now: Long
+    ): Boolean {
+        val wasComplete = isComplete(listId) == true
         updateItemCompleted(itemId, completed)
         refreshCompletion(listId, now)
+        return !wasComplete && isComplete(listId) == true
     }
 
+    /** Returns true when removing the last unchecked item completed the list. See [addItem]. */
     @Transaction
-    open suspend fun removeItem(listId: Long, itemId: Long, now: Long) {
+    open suspend fun removeItem(listId: Long, itemId: Long, now: Long): Boolean {
+        val wasComplete = isComplete(listId) == true
         deleteItem(itemId)
         refreshCompletion(listId, now)
+        return !wasComplete && isComplete(listId) == true
     }
+
+    @Query("SELECT * FROM lists WHERE id = :listId")
+    abstract suspend fun getList(listId: Long): ListEntity?
+
+    @Query("SELECT * FROM list_items WHERE listId = :listId ORDER BY sortOrder ASC, id ASC")
+    abstract suspend fun getItems(listId: Long): List<ListItemEntity>
+
+    @Query("UPDATE lists SET webhookEnabled = :enabled WHERE id = :id")
+    abstract suspend fun setWebhookEnabled(id: Long, enabled: Boolean)
+
+    @Query("UPDATE lists SET webhookUrl = :url WHERE id = :id")
+    abstract suspend fun setWebhookUrl(id: Long, url: String)
+
+    @Query(
+        """
+        UPDATE lists
+        SET lastDeliveryAt = :at,
+            lastDeliveryStatus = :status,
+            lastDeliveryCode = :code,
+            lastDeliveryError = :error
+        WHERE id = :id
+        """
+    )
+    abstract suspend fun recordDelivery(
+        id: Long,
+        at: Long,
+        status: String,
+        code: Int?,
+        error: String?
+    )
 
     /**
      * A list counts as complete once it holds at least one item and none are left unchecked.
@@ -108,4 +155,8 @@ abstract class ListsDao {
 
     @Query("UPDATE lists SET completedAt = NULL WHERE id = :id")
     protected abstract suspend fun clearCompleted(id: Long)
+
+    /** Null when the list no longer exists, e.g. it was deleted while an edit was in flight. */
+    @Query("SELECT completedAt IS NOT NULL FROM lists WHERE id = :id")
+    protected abstract suspend fun isComplete(id: Long): Boolean?
 }
