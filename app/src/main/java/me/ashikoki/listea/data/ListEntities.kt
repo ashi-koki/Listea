@@ -29,7 +29,13 @@ data class ListEntity(
      * depending on a raw filesystem path or on a child document URI staying resolvable.
      */
     val sourceRootUri: String? = null,
-    val sourceRelativePath: String? = null
+    val sourceRelativePath: String? = null,
+
+    /**
+     * Where swipe Review should resume. A stable item id, never an index: re-sync, missing-item
+     * cleanup and manual deletes all shift positions, and a stale id simply falls back.
+     */
+    val reviewCurrentItemId: Long? = null
 )
 
 @Entity(

@@ -54,7 +54,8 @@ fun ListDetailScreen(
     modifier: Modifier,
     viewModel: ListsViewModel,
     listId: Long,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onReview: () -> Unit = {}
 ) {
     val detailFlow = remember(listId) { viewModel.observeDetail(listId) }
     val detail by detailFlow.collectAsStateWithLifecycle(initialValue = null)
@@ -79,7 +80,14 @@ fun ListDetailScreen(
     }
 
     Column(modifier.fillMaxSize()) {
-        TextButton(onClick = onBack) { Text("‹ Lists") }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("‹ Lists") }
+            Spacer(Modifier.weight(1f))
+            // Review is available for every list with items, folder-backed or manual.
+            if (current.items.isNotEmpty()) {
+                Button(onClick = onReview) { Text("Review") }
+            }
+        }
         Text(current.list.title, style = MaterialTheme.typography.titleLarge)
         Text(
             progressLabel(current.completedCount, current.items.size, current.isComplete),

@@ -277,6 +277,9 @@ abstract class ListsDao {
         )
     }
 
+    @Query("UPDATE lists SET reviewCurrentItemId = :itemId WHERE id = :id")
+    abstract suspend fun setReviewPosition(id: Long, itemId: Long?)
+
     @Query("UPDATE lists SET webhookEnabled = :enabled WHERE id = :id")
     abstract suspend fun setWebhookEnabled(id: Long, enabled: Boolean)
 

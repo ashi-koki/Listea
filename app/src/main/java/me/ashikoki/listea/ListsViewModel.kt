@@ -298,6 +298,11 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         _resyncRequest.value = null
     }
 
+    /** Remembers where Review is, by item id. Never touches completion state. */
+    fun setReviewPosition(listId: Long, itemId: Long?) = launchDb {
+        dao.setReviewPosition(listId, itemId)
+    }
+
     fun setWebhookEnabled(listId: Long, enabled: Boolean) = launchDb {
         dao.setWebhookEnabled(listId, enabled)
     }

@@ -45,6 +45,7 @@ fun ListsScreen(
     onRequestConsumed: () -> Unit = {}
 ) {
     var openListId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var reviewListId by rememberSaveable { mutableStateOf<Long?>(null) }
 
     // The Folder tab can ask for a specific list to be opened.
     LaunchedEffect(requestedListId) {
@@ -54,19 +55,28 @@ fun ListsScreen(
         }
     }
 
+    val reviewing = reviewListId
     val listId = openListId
-    if (listId == null) {
-        ListsIndex(
+    when {
+        reviewing != null -> ReviewScreen(
+            modifier = modifier,
+            viewModel = viewModel,
+            listId = reviewing,
+            onBack = { reviewListId = null }
+        )
+
+        listId == null -> ListsIndex(
             modifier = modifier,
             viewModel = viewModel,
             onOpenList = { openListId = it }
         )
-    } else {
-        ListDetailScreen(
+
+        else -> ListDetailScreen(
             modifier = modifier,
             viewModel = viewModel,
             listId = listId,
-            onBack = { openListId = null }
+            onBack = { openListId = null },
+            onReview = { reviewListId = listId }
         )
     }
 }
