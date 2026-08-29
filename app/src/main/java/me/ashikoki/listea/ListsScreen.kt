@@ -23,6 +23,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,14 +31,28 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import me.ashikoki.listea.data.ListSummary
 
 @Composable
-fun ListsScreen(modifier: Modifier = Modifier, viewModel: ListsViewModel = viewModel()) {
+fun ListsScreen(
+    modifier: Modifier = Modifier,
+    viewModel: ListsViewModel = viewModel(),
+    requestedListId: Long? = null,
+    onRequestConsumed: () -> Unit = {}
+) {
     var openListId by rememberSaveable { mutableStateOf<Long?>(null) }
+
+    // The Folder tab can ask for a specific list to be opened.
+    LaunchedEffect(requestedListId) {
+        if (requestedListId != null) {
+            openListId = requestedListId
+            onRequestConsumed()
+        }
+    }
 
     val listId = openListId
     if (listId == null) {
@@ -157,6 +172,17 @@ private fun ListRow(
                 progressLabel(summary.completedItems, summary.totalItems, summary.isComplete),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                webhookStatusLabel(
+                    enabled = summary.webhookEnabled,
+                    lastDeliveryStatus = summary.lastDeliveryStatus,
+                    lastDeliveryCode = summary.lastDeliveryCode
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
         Box {

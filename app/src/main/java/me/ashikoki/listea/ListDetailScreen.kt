@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -29,16 +30,22 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
 
@@ -84,6 +91,20 @@ fun ListDetailScreen(
             }
         )
         Spacer(Modifier.height(12.dp))
+
+        // Only folder-backed lists have a source to reconcile against.
+        val rootUri = current.list.sourceRootUri
+        val relativePath = current.list.sourceRelativePath
+        if (rootUri != null && relativePath != null) {
+            SourceSection(
+                rootUri = rootUri,
+                relativePath = relativePath,
+                missingCount = current.items.count { it.sourceMissing },
+                onResync = { viewModel.requestResync(listId) },
+                onClearMissing = { viewModel.requestMissingCleanup(listId) }
+            )
+            Spacer(Modifier.height(12.dp))
+        }
 
         WebhookSection(
             list = current.list,
@@ -139,6 +160,161 @@ fun ListDetailScreen(
             onConfirm = { viewModel.renameItem(target.id, it); editing = null },
             onDismiss = { editing = null }
         )
+    }
+
+    ResyncDialogs(viewModel)
+}
+
+@Composable
+private fun ResyncDialogs(viewModel: ListsViewModel) {
+    val request by viewModel.resyncRequest.collectAsStateWithLifecycle()
+
+    when (val current = request) {
+        null -> Unit
+
+        is ResyncRequest.Scanning -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Checking folder") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.width(16.dp))
+                    Text("Comparing this list with its source folder.")
+                }
+            },
+            confirmButton = {}
+        )
+
+        is ResyncRequest.UpToDate -> AlertDialog(
+            onDismissRequest = { viewModel.dismissResyncRequest() },
+            title = { Text("List is up to date") },
+            text = { Text("Nothing has changed in the source folder.") },
+            confirmButton = {
+                TextButton(onClick = { viewModel.dismissResyncRequest() }) { Text("OK") }
+            }
+        )
+
+        is ResyncRequest.Confirm -> AlertDialog(
+            onDismissRequest = { viewModel.dismissResyncRequest() },
+            title = { Text("Folder changes detected") },
+            text = {
+                val diff = current.diff
+                Column {
+                    Text(countLine(diff.addedPaths.size, "new file"))
+                    Text(countLine(diff.missingPaths.size, "missing file"))
+                    if (diff.restoredPaths.isNotEmpty()) {
+                        Text(countLine(diff.restoredPaths.size, "restored file"))
+                    }
+                    Text("${diff.unchangedCount} unchanged")
+                    Spacer(Modifier.height(8.dp))
+                    diff.addedPaths.take(PREVIEW_PATHS).forEach { Text("+ $it") }
+                    diff.missingPaths.take(PREVIEW_PATHS).forEach { Text("- $it") }
+                    Text(
+                        "Missing files stay in the list and keep their checked state.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmResync() }) { Text("Update list") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissResyncRequest() }) { Text("Cancel") }
+            }
+        )
+
+        is ResyncRequest.CleanupMissing -> AlertDialog(
+            onDismissRequest = { viewModel.dismissResyncRequest() },
+            title = { Text("Remove missing items?") },
+            text = {
+                Column {
+                    Text(
+                        countLine(current.missingCount, "item") +
+                            if (current.missingCount == 1) {
+                                " no longer exists in the source folder."
+                            } else {
+                                " no longer exist in the source folder."
+                            }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Keeping them preserves their checked state. Removing them cannot be undone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmRemoveMissingItems() }) {
+                    Text("Remove ${countLine(current.missingCount, "item")}")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissResyncRequest() }) { Text("Keep items") }
+            }
+        )
+
+        is ResyncRequest.Error -> AlertDialog(
+            onDismissRequest = { viewModel.dismissResyncRequest() },
+            title = { Text("Could not refresh") },
+            text = { Text(current.message) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.dismissResyncRequest() }) { Text("OK") }
+            }
+        )
+    }
+}
+
+private const val PREVIEW_PATHS = 5
+
+private fun countLine(count: Int, noun: String): String =
+    "$count $noun" + if (count == 1) "" else "s"
+
+/**
+ * Where a folder-backed list came from, the manual re-sync action, and — whenever any source is
+ * missing — a standing cleanup action. The cleanup offer shown right after a re-sync can be
+ * dismissed, and a later re-sync will report "up to date" because the items are already flagged,
+ * so this button is the way back to it.
+ */
+@Composable
+private fun SourceSection(
+    rootUri: String,
+    relativePath: String,
+    missingCount: Int,
+    onResync: () -> Unit,
+    onClearMissing: () -> Unit
+) {
+    val context = LocalContext.current
+    val label by produceState(relativePath, rootUri, relativePath) {
+        value = withContext(Dispatchers.IO) {
+            sourceFolderLabel(context, rootUri.toUri(), relativePath)
+        }
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        Text("Source", style = MaterialTheme.typography.labelMedium)
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onResync) { Text("Refresh from folder") }
+            if (missingCount > 0) {
+                TextButton(onClick = onClearMissing) {
+                    Text(
+                        "Clear $missingCount missing",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -236,20 +412,41 @@ private fun ItemRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Checkbox(checked = item.isCompleted, onCheckedChange = onToggle)
-        Text(
-            text = item.title,
-            style = MaterialTheme.typography.bodyLarge,
-            textDecoration = if (item.isCompleted) TextDecoration.LineThrough else null,
-            color = if (item.isCompleted) {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            } else {
-                MaterialTheme.colorScheme.onSurface
-            },
-            modifier = Modifier
+        Column(
+            Modifier
                 .weight(1f)
                 .clickable(onClick = onEdit)
                 .padding(vertical = 12.dp)
-        )
+        ) {
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.bodyLarge,
+                textDecoration = if (item.isCompleted) TextDecoration.LineThrough else null,
+                color = if (item.isCompleted) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                }
+            )
+            // Folder-backed items keep their path so bilibili/a.jpg stays distinct from danbooru/a.jpg.
+            item.sourceRelativePath?.takeIf { it != item.title }?.let { path ->
+                Text(
+                    path,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            // Subtle: the item stays checkable and is never hidden or removed.
+            if (item.sourceMissing) {
+                Text(
+                    "Source missing",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
         IconButton(onClick = onDelete) {
             Text("✕", style = MaterialTheme.typography.titleMedium)
         }

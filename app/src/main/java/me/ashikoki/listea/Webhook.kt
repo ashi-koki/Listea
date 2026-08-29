@@ -182,6 +182,26 @@ private fun shortError(e: Throwable): String = when (e) {
     else -> (e.message ?: e::class.java.simpleName).take(120)
 }
 
+/**
+ * Compact webhook state for a browse row, e.g. "Webhook · On · Failed · HTTP 500".
+ * Deliberately omits the URL, timestamp and error text so folder cards and list rows stay
+ * glanceable; the List detail screen shows the fuller [deliveryLabel] instead.
+ * A delivery always records its timestamp and status together, so a null [lastDeliveryStatus]
+ * means nothing has been sent yet.
+ */
+fun webhookStatusLabel(
+    enabled: Boolean,
+    lastDeliveryStatus: String?,
+    lastDeliveryCode: Int?
+): String {
+    if (!enabled) return "Webhook · Off"
+    return "Webhook · On · " + when (lastDeliveryStatus) {
+        null -> "Never sent"
+        DeliveryStatus.SUCCESS.name -> "Success"
+        else -> "Failed" + (lastDeliveryCode?.let { " · HTTP $it" } ?: "")
+    }
+}
+
 /** "Last delivery: Success / 18:42", or a short failure reason. */
 fun deliveryLabel(list: ListEntity): String {
     val at = list.lastDeliveryAt ?: return "Last delivery: never sent"

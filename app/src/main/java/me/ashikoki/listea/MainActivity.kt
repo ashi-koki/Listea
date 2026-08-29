@@ -1,6 +1,7 @@
 package me.ashikoki.listea
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -8,7 +9,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,14 +16,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
 import androidx.compose.material3.PrimaryTabRow
@@ -44,6 +47,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -70,6 +75,7 @@ private enum class MainTab(val label: String) { Folder("Folder"), Lists("Lists")
 @Composable
 fun ListeaApp(modifier: Modifier = Modifier) {
     var tab by rememberSaveable { mutableStateOf(MainTab.Folder) }
+    var requestedListId by rememberSaveable { mutableStateOf<Long?>(null) }
 
     Column(modifier.fillMaxSize()) {
         Text(
@@ -89,8 +95,19 @@ fun ListeaApp(modifier: Modifier = Modifier) {
         }
         val screenModifier = Modifier.weight(1f).padding(16.dp)
         when (tab) {
-            MainTab.Folder -> FolderScreen(modifier = screenModifier)
-            MainTab.Lists -> ListsScreen(modifier = screenModifier)
+            MainTab.Folder -> FolderScreen(
+                modifier = screenModifier,
+                onOpenList = { listId ->
+                    requestedListId = listId
+                    tab = MainTab.Lists
+                }
+            )
+
+            MainTab.Lists -> ListsScreen(
+                modifier = screenModifier,
+                requestedListId = requestedListId,
+                onRequestConsumed = { requestedListId = null }
+            )
         }
     }
 }
@@ -109,9 +126,14 @@ private sealed interface FolderUiState {
 }
 
 @Composable
-fun FolderScreen(modifier: Modifier = Modifier) {
+fun FolderScreen(
+    modifier: Modifier = Modifier,
+    onOpenList: (Long) -> Unit = {},
+    listsViewModel: ListsViewModel = viewModel()
+) {
     val context = LocalContext.current
     val store = remember { FolderStore(context) }
+    val folderListRequest by listsViewModel.folderListRequest.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val load = remember { LoadJob() }
     var state by remember { mutableStateOf<FolderUiState>(FolderUiState.Loading) }
@@ -218,13 +240,49 @@ fun FolderScreen(modifier: Modifier = Modifier) {
             }
 
             is FolderUiState.Browsing -> {
+                val rootUri = current.stack.first().uri.toString()
+                val ownershipFlow = remember(rootUri) {
+                    listsViewModel.observeFolderOwnership(rootUri)
+                }
+                val ownership by ownershipFlow
+                    .collectAsStateWithLifecycle(initialValue = FolderOwnership())
+                val here = relativePathOf(current.stack)
+
+                // Ownership for the current folder and every visible directory, derived once per
+                // data change rather than per card recomposition, from one indexed lookup each.
+                val statuses = remember(ownership, here, current.contents.entries) {
+                    buildMap {
+                        put(here, folderListStatus(ownership, here))
+                        current.contents.entries.forEach { entry ->
+                            if (entry.isDirectory) {
+                                val path = childRelativePath(here, entry.name)
+                                put(path, folderListStatus(ownership, path))
+                            }
+                        }
+                    }
+                }
+                fun statusOf(path: String) = statuses[path] ?: FolderListStatus.None
+
+                fun requestList(path: String, folderUri: Uri, folderName: String) {
+                    listsViewModel.requestListForFolder(
+                        rootUri = rootUri,
+                        relativePath = path,
+                        folderUri = folderUri,
+                        folderName = folderName
+                    )
+                }
+
                 Text(
                     current.stack.joinToString(" / ") { it.name },
                     style = MaterialTheme.typography.titleMedium
                 )
-                Text(
-                    "${current.contents.entries.size} entries",
-                    style = MaterialTheme.typography.bodyMedium
+                CurrentFolderStatus(
+                    entryCount = current.contents.entries.size,
+                    status = statusOf(here),
+                    onOpenList = onOpenList,
+                    onCreateList = {
+                        requestList(here, current.stack.last().uri, current.stack.last().name)
+                    }
                 )
                 Spacer(Modifier.height(12.dp))
                 Row(
@@ -247,52 +305,289 @@ fun FolderScreen(modifier: Modifier = Modifier) {
                 } else {
                     LazyColumn(Modifier.fillMaxSize()) {
                         items(current.contents.entries, key = { it.uri }) { entry ->
-                            EntryRow(
-                                entry = entry,
-                                onOpen = { open(current.stack + DirRef(entry.uri, entry.name)) }
-                            )
-                            HorizontalDivider()
+                            if (entry.isDirectory) {
+                                val path = childRelativePath(here, entry.name)
+                                FolderCard(
+                                    entry = entry,
+                                    status = statusOf(path),
+                                    onNavigate = {
+                                        open(current.stack + DirRef(entry.uri, entry.name))
+                                    },
+                                    onOpenList = onOpenList,
+                                    onCreateList = { requestList(path, entry.uri, entry.name) }
+                                )
+                            } else {
+                                // A file's checked state comes from whichever list owns the
+                                // folder it sits in, direct or inherited.
+                                val owner = owningScope(statusOf(here))
+                                FileRow(
+                                    entry = entry,
+                                    isChecked = owner?.let {
+                                        ownership.itemCompletion[
+                                            it.id to childRelativePath(here, entry.name)
+                                        ]
+                                    }
+                                )
+                                HorizontalDivider()
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    when (val request = folderListRequest) {
+        null -> Unit
+
+        is FolderListRequest.Scanning -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Scanning folder") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.width(16.dp))
+                    Text("Looking for files in this folder and everything below it.")
+                }
+            },
+            confirmButton = {}
+        )
+
+        is FolderListRequest.Confirm -> AlertDialog(
+            onDismissRequest = { listsViewModel.dismissFolderListRequest() },
+            title = { Text("Replace existing folder lists?") },
+            text = {
+                val count = request.replacedTitles.size
+                Column {
+                    Text(
+                        "Creating a list for " + request.folderName +
+                            " (" + request.fileCount + " files) will replace " + count +
+                            " existing folder " + (if (count == 1) "list" else "lists") + ":"
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    request.replacedTitles.forEach { title -> Text("- $title") }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { listsViewModel.confirmListForFolder() }) { Text("Continue") }
+            },
+            dismissButton = {
+                TextButton(onClick = { listsViewModel.dismissFolderListRequest() }) { Text("Cancel") }
+            }
+        )
+
+        is FolderListRequest.Error -> AlertDialog(
+            onDismissRequest = { listsViewModel.dismissFolderListRequest() },
+            title = { Text("Could not create list") },
+            text = { Text(request.message) },
+            confirmButton = {
+                TextButton(onClick = { listsViewModel.dismissFolderListRequest() }) { Text("OK") }
+            }
+        )
+    }
 }
 
+/** Compact status for the folder currently open, alongside its entry count. */
 @Composable
-private fun EntryRow(entry: FolderEntry, onOpen: () -> Unit) {
-    Row(
+private fun CurrentFolderStatus(
+    entryCount: Int,
+    status: FolderListStatus,
+    onOpenList: (Long) -> Unit,
+    onCreateList: () -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("$entryCount entries", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                statusHeadline(status),
+                style = MaterialTheme.typography.bodySmall,
+                color = statusColor(status)
+            )
+            statusDetail(status)?.let { detail ->
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = statusDetailColor(status),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            statusWebhookLabel(status)?.let { webhook ->
+                Text(
+                    webhook,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        StatusAction(status = status, onOpenList = onOpenList, onCreateList = onCreateList)
+    }
+}
+
+/**
+ * A directory with its List ownership. Tapping the card navigates into the folder; the List
+ * action stays a separate button, as in V3.1.
+ */
+@Composable
+private fun FolderCard(
+    entry: FolderEntry,
+    status: FolderListStatus,
+    onNavigate: () -> Unit,
+    onOpenList: (Long) -> Unit,
+    onCreateList: () -> Unit
+) {
+    OutlinedCard(
+        onClick = onNavigate,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = entry.isDirectory, onClick = onOpen)
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(vertical = 4.dp)
     ) {
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    entry.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "›",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Text(
-                entry.name,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            val detail = buildList {
-                add(if (entry.isDirectory) "Directory" else "File")
-                entry.sizeBytes?.let { add(formatSize(it)) }
-                entry.lastModified?.let { add(formatTimestamp(it)) }
-            }.joinToString(" · ")
-            Text(
-                detail,
+                entryDetail(entry),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        statusHeadline(status),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = statusColor(status)
+                    )
+                    statusDetail(status)?.let { detail ->
+                        Text(
+                            detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = statusDetailColor(status),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    statusWebhookLabel(status)?.let { webhook ->
+                        Text(
+                            webhook,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                StatusAction(status = status, onOpenList = onOpenList, onCreateList = onCreateList)
+            }
         }
-        if (entry.isDirectory) {
+    }
+}
+
+/**
+ * A file row. Still has no action of its own, but shows its review state when the owning list
+ * tracks it. [isChecked] is null when no list covers this folder, or when the file is not part of
+ * the owning list's snapshot.
+ */
+@Composable
+private fun FileRow(entry: FolderEntry, isChecked: Boolean?) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp)
+    ) {
+        Text(
+            entry.name,
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            entryDetail(entry),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (isChecked != null) {
             Text(
-                "›",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                if (isChecked) "Checked ✓" else "Not checked",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isChecked) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
             )
         }
     }
 }
+
+@Composable
+private fun StatusAction(
+    status: FolderListStatus,
+    onOpenList: (Long) -> Unit,
+    onCreateList: () -> Unit
+) {
+    when (status) {
+        is FolderListStatus.Direct ->
+            TextButton(onClick = { onOpenList(status.scope.id) }) { Text("Open") }
+
+        is FolderListStatus.None ->
+            TextButton(onClick = onCreateList) { Text("Create list") }
+
+        // Offered deliberately and labelled differently: this runs the V3.1 confirmation, which
+        // spells out that the ancestor list would be replaced.
+        is FolderListStatus.Inherited ->
+            TextButton(onClick = onCreateList) { Text("Create own list") }
+    }
+}
+
+private fun statusHeadline(status: FolderListStatus): String = when (status) {
+    is FolderListStatus.None -> "No list"
+    is FolderListStatus.Direct -> "List · " + scopeProgressLabel(status.scope)
+    is FolderListStatus.Inherited -> "Managed by parent list"
+}
+
+private fun statusDetail(status: FolderListStatus): String? = when (status) {
+    is FolderListStatus.None -> null
+    is FolderListStatus.Direct -> if (status.scope.isComplete) "Completed" else "In progress"
+
+    // This folder's own subtree, not the owning list's overall total.
+    is FolderListStatus.Inherited ->
+        progressLabel(status.subtreeCompleted, status.subtreeTotal, status.subtreeIsComplete) +
+            " · " + status.scope.title
+}
+
+@Composable
+private fun statusColor(status: FolderListStatus) = when {
+    status is FolderListStatus.Direct && status.scope.isComplete -> MaterialTheme.colorScheme.primary
+    status is FolderListStatus.None -> MaterialTheme.colorScheme.onSurfaceVariant
+    else -> MaterialTheme.colorScheme.onSurface
+}
+
+/** A finished subtree gets the same tint a finished direct list gets. */
+@Composable
+private fun statusDetailColor(status: FolderListStatus) =
+    if (status is FolderListStatus.Inherited && status.subtreeIsComplete) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+private fun entryDetail(entry: FolderEntry): String = buildList {
+    add(if (entry.isDirectory) "Directory" else "File")
+    entry.sizeBytes?.let { add(formatSize(it)) }
+    entry.lastModified?.let { add(formatTimestamp(it)) }
+}.joinToString(" · ")
