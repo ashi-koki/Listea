@@ -3,13 +3,17 @@ package me.ashikoki.listea
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
-/** A direct child of the selected folder. */
+/** A direct child of the directory currently being shown. */
 data class FolderEntry(
     val name: String,
+    val uri: Uri,
     val isDirectory: Boolean,
-    val sizeBytes: Long?
+    val sizeBytes: Long?,
+    val lastModified: Long?
 )
 
 data class FolderContents(
@@ -18,39 +22,48 @@ data class FolderContents(
 )
 
 /**
- * Reads the direct children of [treeUri]. Blocking I/O: call off the main thread.
- * Returns null when the folder can no longer be read (permission revoked, folder deleted,
- * storage unmounted, ...), which the caller treats as "no folder selected".
+ * One directory on the path from the selected root to the directory being shown.
+ * [uri] is the root tree URI for the first element and a tree-document URI below it;
+ * both are accepted by [DocumentFile.fromTreeUri], so navigating down never re-prompts for SAF access.
  */
-fun readFolder(context: Context, treeUri: Uri): FolderContents? {
-    val stillGranted = context.contentResolver.persistedUriPermissions
-        .any { it.uri == treeUri && it.isReadPermission }
-    if (!stillGranted) return null
+data class DirRef(val uri: Uri, val name: String)
 
-    return runCatching {
-        val folder = DocumentFile.fromTreeUri(context, treeUri)
-        if (folder == null || !folder.isDirectory || !folder.canRead()) return@runCatching null
+/** True while the user's originally selected root is still readable through SAF. */
+fun hasPersistedReadAccess(context: Context, rootUri: Uri): Boolean =
+    context.contentResolver.persistedUriPermissions
+        .any { it.uri == rootUri && it.isReadPermission }
 
-        val entries = folder.listFiles()
-            .map { child ->
-                val isDirectory = child.isDirectory
-                FolderEntry(
-                    name = child.name ?: "(unnamed)",
-                    isDirectory = isDirectory,
-                    sizeBytes = if (isDirectory) null else child.length()
-                )
-            }
-            .sortedWith(
-                compareByDescending<FolderEntry> { it.isDirectory }
-                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+/**
+ * Reads the direct children of [dirUri] (the selected root, or any directory below it).
+ * Blocking I/O: call off the main thread.
+ * Returns null when that directory can no longer be read (deleted by another app, permission
+ * revoked, storage unmounted, ...), which the caller handles by falling back to a parent.
+ */
+fun readFolder(context: Context, dirUri: Uri): FolderContents? = runCatching {
+    val folder = DocumentFile.fromTreeUri(context, dirUri)
+    if (folder == null || !folder.isDirectory || !folder.canRead()) return@runCatching null
+
+    val entries = folder.listFiles()
+        .map { child ->
+            val isDirectory = child.isDirectory
+            FolderEntry(
+                name = child.name ?: "(unnamed)",
+                uri = child.uri,
+                isDirectory = isDirectory,
+                sizeBytes = if (isDirectory) null else child.length(),
+                lastModified = child.lastModified().takeIf { it > 0 }
             )
-
-        FolderContents(
-            folderName = folder.name ?: treeUri.lastPathSegment ?: "Selected folder",
-            entries = entries
+        }
+        .sortedWith(
+            compareByDescending<FolderEntry> { it.isDirectory }
+                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
         )
-    }.getOrNull()
-}
+
+    FolderContents(
+        folderName = folder.name ?: dirUri.lastPathSegment ?: "Selected folder",
+        entries = entries
+    )
+}.getOrNull()
 
 fun formatSize(bytes: Long): String {
     val units = listOf("B", "KB", "MB", "GB", "TB")
@@ -63,3 +76,6 @@ fun formatSize(bytes: Long): String {
     return if (unit == 0) "$bytes B"
     else String.format(Locale.US, "%.1f %s", value, units[unit])
 }
+
+fun formatTimestamp(millis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(millis))
