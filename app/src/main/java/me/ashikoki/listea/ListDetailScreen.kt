@@ -28,6 +28,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -43,12 +44,16 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import me.ashikoki.listea.data.FolderDiff
+import me.ashikoki.listea.data.ListDetail
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
-import me.ashikoki.listea.data.itemActionLabel
 
 @Composable
 fun ListDetailScreen(
@@ -64,6 +69,28 @@ fun ListDetailScreen(
     var editing by remember { mutableStateOf<ListItemEntity?>(null) }
 
     BackHandler { onBack() }
+
+    // One check per page entry, plus one whenever the app returns to the foreground while this
+    // page is the one on screen: another app (a file manager, FolderSync, ...) may have added or
+    // deleted source files while we were away.
+    //
+    // Adding the observer dispatches ON_RESUME immediately to bring it up to the current state,
+    // and that first dispatch is the entry check — so this single effect covers both triggers
+    // without checking twice. Keyed on listId as well as the owner, which LifecycleEventEffect
+    // cannot do, so switching lists re-registers and re-checks. Ordinary recomposition —
+    // checkboxes, actions, database emissions — does neither. Placed before the loading return
+    // so the check is tied to entering the page, not to data arriving.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, listId) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.checkSourceFreshness(listId)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val freshness by viewModel.sourceFreshness.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     val current = detail
     if (current == null) {
@@ -83,25 +110,16 @@ fun ListDetailScreen(
     Column(modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) { Text("‹ Lists") }
-            Spacer(Modifier.weight(1f))
-            // Review is available for every list with items, folder-backed or manual.
-            if (current.items.isNotEmpty()) {
-                Button(onClick = onReview) { Text("Review") }
-            }
+            Text(
+                current.list.title,
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
-        Text(current.list.title, style = MaterialTheme.typography.titleLarge)
-        Text(
-            progressLabel(current.completedCount, current.items.size, current.isComplete),
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (current.isComplete) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            }
-        )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
 
-        // Only folder-backed lists have a source to reconcile against.
+        // 1. Source — only folder-backed lists have one to reconcile against.
         val rootUri = current.list.sourceRootUri
         val relativePath = current.list.sourceRelativePath
         if (rootUri != null && relativePath != null) {
@@ -109,22 +127,57 @@ fun ListDetailScreen(
                 rootUri = rootUri,
                 relativePath = relativePath,
                 missingCount = current.items.count { it.sourceMissing },
+                // Only this list's own verdict: a result for any other list is ignored outright.
+                freshness = freshness?.takeIf { it.listId == listId }?.state,
                 onResync = { viewModel.requestResync(listId) },
                 onClearMissing = { viewModel.requestMissingCleanup(listId) }
             )
             Spacer(Modifier.height(12.dp))
         }
 
-        WebhookSection(
-            list = current.list,
-            onEnabledChange = { viewModel.setWebhookEnabled(listId, it) },
-            onUrlChange = { viewModel.setWebhookUrl(listId, it) },
-            onTest = { viewModel.testWebhook(listId) }
+        // 2. Progress — the count, the way into Review, and the webhook that completion drives.
+        ProgressSection(
+            detail = current,
+            onReview = onReview,
+            webhook = {
+                WebhookSection(
+                    list = current.list,
+                    onEnabledChange = { viewModel.setWebhookEnabled(listId, it) },
+                    onUrlChange = { viewModel.setWebhookUrl(listId, it) },
+                    onTest = { viewModel.testWebhook(listId) }
+                )
+            }
         )
         Spacer(Modifier.height(12.dp))
+        HorizontalDivider()
 
+        // 3. Items — ListItems only. A folder-backed list holds its source files, however deep
+        // they sit; the folders they came from are not items and never appear here.
+        if (current.items.isEmpty()) {
+            Spacer(Modifier.height(16.dp))
+            Text("No items yet", style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.weight(1f))
+        } else {
+            LazyColumn(Modifier.weight(1f)) {
+                items(current.items, key = { it.id }) { item ->
+                    ItemRow(
+                        item = item,
+                        actionLabel = itemActionLabel(item, settings),
+                        onToggle = { viewModel.setItemCompleted(item, it) },
+                        onEdit = { editing = item },
+                        onDelete = { viewModel.deleteItem(item) }
+                    )
+                    HorizontalDivider()
+                }
+            }
+        }
+
+        // 4. Add item, at the end of what it adds to.
+        HorizontalDivider()
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -138,25 +191,6 @@ fun ListDetailScreen(
                 keyboardActions = KeyboardActions(onDone = { submitNewItem() })
             )
             Button(onClick = { submitNewItem() }, enabled = newItem.isNotBlank()) { Text("Add") }
-        }
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
-
-        if (current.items.isEmpty()) {
-            Spacer(Modifier.height(16.dp))
-            Text("No items yet", style = MaterialTheme.typography.bodyMedium)
-        } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(current.items, key = { it.id }) { item ->
-                    ItemRow(
-                        item = item,
-                        onToggle = { viewModel.setItemCompleted(item, it) },
-                        onEdit = { editing = item },
-                        onDelete = { viewModel.deleteItem(item) }
-                    )
-                    HorizontalDivider()
-                }
-            }
         }
     }
 
@@ -281,16 +315,52 @@ private fun countLine(count: Int, noun: String): String =
     "$count $noun" + if (count == 1) "" else "s"
 
 /**
- * Where a folder-backed list came from, the manual re-sync action, and — whenever any source is
- * missing — a standing cleanup action. The cleanup offer shown right after a re-sync can be
- * dismissed, and a later re-sync will report "up to date" because the items are already flagged,
- * so this button is the way back to it.
+ * How far along the list is, and the two things that act on that: Review, and the webhook that a
+ * completion delivers. The count speaks for itself — no "in progress" restating what "12 / 20"
+ * already says.
+ */
+@Composable
+private fun ProgressSection(
+    detail: ListDetail,
+    onReview: () -> Unit,
+    webhook: @Composable () -> Unit
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                progressLabel(detail.completedCount, detail.items.size, detail.isComplete),
+                style = MaterialTheme.typography.titleMedium,
+                color = if (detail.isComplete) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                modifier = Modifier.weight(1f)
+            )
+            if (detail.items.isNotEmpty()) {
+                Button(onClick = onReview) { Text("Review") }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        webhook()
+    }
+}
+
+/**
+ * Where a folder-backed list came from, its source freshness, the manual update action, and —
+ * whenever any source is missing — a standing cleanup action. The cleanup offer shown right
+ * after an update can be dismissed, and a later update will report "up to date" because the items
+ * are already flagged, so this button is the way back to it.
+ *
+ * Freshness is reported here and nowhere else: detecting changes never opens a dialog by itself.
+ * The user is told, and decides when to act.
  */
 @Composable
 private fun SourceSection(
     rootUri: String,
     relativePath: String,
     missingCount: Int,
+    freshness: SourceFreshness?,
     onResync: () -> Unit,
     onClearMissing: () -> Unit
 ) {
@@ -310,11 +380,18 @@ private fun SourceSection(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+        freshness?.let { FreshnessLine(it) }
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(onClick = onResync) { Text("Refresh from folder") }
+            // Unacknowledged changes promote the action to a filled button: hard to miss, but
+            // still just a button. "Update", not "check": checking already happened on entry.
+            if (freshness is SourceFreshness.ChangesAvailable) {
+                Button(onClick = onResync) { Text("Update from folder") }
+            } else {
+                TextButton(onClick = onResync) { Text("Update from folder") }
+            }
             if (missingCount > 0) {
                 TextButton(onClick = onClearMissing) {
                     Text(
@@ -326,6 +403,36 @@ private fun SourceSection(
         }
     }
 }
+
+/** Compact, inline, never modal: the page stays usable while a scan is running. */
+@Composable
+private fun FreshnessLine(state: SourceFreshness) {
+    val text = when (state) {
+        SourceFreshness.Checking -> "Checking source…"
+        SourceFreshness.UpToDate -> "✓ Up to date"
+        SourceFreshness.SourceUnavailable -> "! Source unavailable"
+        is SourceFreshness.ChangesAvailable -> "! Changes detected · " + changesSummary(state.diff)
+    }
+    val color = when (state) {
+        SourceFreshness.Checking -> MaterialTheme.colorScheme.onSurfaceVariant
+        SourceFreshness.UpToDate -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.error
+    }
+    Text(text, style = MaterialTheme.typography.bodySmall, color = color)
+}
+
+/**
+ * "3 new files · 1 missing file", naming only what actually changed.
+ *
+ * Counts newly missing files rather than every missing path: files already acknowledged as
+ * missing are not news, and reporting them here would contradict the up-to-date verdict a list
+ * holding them is entitled to.
+ */
+private fun changesSummary(diff: FolderDiff): String = buildList {
+    if (diff.addedPaths.isNotEmpty()) add(countLine(diff.addedPaths.size, "new file"))
+    if (diff.newlyMissingCount > 0) add(countLine(diff.newlyMissingCount, "missing file"))
+    if (diff.restoredPaths.isNotEmpty()) add(countLine(diff.restoredPaths.size, "restored file"))
+}.joinToString(" · ")
 
 /**
  * The list's optional completion action. Collapsed by default so the items stay the focus.
@@ -412,6 +519,7 @@ private fun WebhookSection(
 @Composable
 private fun ItemRow(
     item: ListItemEntity,
+    actionLabel: String?,
     onToggle: (Boolean) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
@@ -447,8 +555,9 @@ private fun ItemRow(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            // Read-only here: actions are set in Review, this row just reports them.
-            itemActionLabel(item)?.let { actions ->
+            // Read-only here: actions are set in Review, this row just reports them, under
+            // whatever names Settings currently gives them.
+            actionLabel?.let { actions ->
                 Text(
                     actions,
                     style = MaterialTheme.typography.bodySmall,

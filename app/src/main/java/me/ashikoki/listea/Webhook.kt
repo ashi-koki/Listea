@@ -4,7 +4,6 @@ import android.os.SystemClock
 import android.util.Log
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
-import me.ashikoki.listea.data.itemActionNames
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.InputStream
@@ -41,6 +40,64 @@ data class DeliveryResult(
     val error: String?
 )
 
+/**
+ * How a completion ended up, from the user's point of view. Distinct from [DeliveryStatus], which
+ * is only ever about a delivery that was actually attempted and is what gets persisted; [DISABLED]
+ * never reaches the database.
+ */
+enum class NoticeOutcome { SENT, FAILED, DISABLED }
+
+/**
+ * What one completion should tell the user, so a result never has to be hunted for on a folder
+ * card or a list screen.
+ *
+ * Raised for every attempt that reached a verdict, including one abandoned over an unusable URL
+ * (which still records a failed delivery), and for a list that completed with its webhook switched
+ * off — otherwise that case is the one the user hears nothing about at all.
+ * [itemCount] is null when no payload was ever built.
+ */
+data class WebhookNotice(
+    val event: String,
+    val listTitle: String,
+    val host: String?,
+    val itemCount: Int?,
+    val outcome: NoticeOutcome,
+    val httpCode: Int?,
+    val error: String?,
+    val at: Long
+) {
+    val succeeded: Boolean get() = outcome == NoticeOutcome.SENT
+
+    val headline: String
+        get() = when (outcome) {
+            NoticeOutcome.SENT -> "Webhook sent"
+            NoticeOutcome.FAILED -> "Webhook not sent"
+            NoticeOutcome.DISABLED -> "Webhook is off"
+        }
+
+    val eventLabel: String
+        get() = when (event) {
+            EVENT_LIST_COMPLETED -> "List completed"
+            EVENT_WEBHOOK_TEST -> "Test webhook"
+            else -> event
+        }
+
+    /** "Success · HTTP 200", "Failed · HTTP 500", "Failed · Timeout". */
+    val outcomeLabel: String
+        get() = when (outcome) {
+            NoticeOutcome.SENT -> "Success" + (httpCode?.let { " · HTTP $it" } ?: "")
+            NoticeOutcome.FAILED -> "Failed · " + (httpCode?.let { "HTTP $it" } ?: error ?: "Failed")
+            NoticeOutcome.DISABLED -> "Nothing was sent · this list's webhook is switched off"
+        }
+
+    val timeLabel: String
+        get() = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(at))
+}
+
+/** Host of a webhook URL, for showing where something went without exposing the full URL. */
+fun webhookHost(url: String): String? =
+    runCatching { URL(url).host }.getOrNull()?.takeIf { it.isNotBlank() }
+
 /** Returns a user-readable problem with [url], or null when it is usable. */
 fun webhookUrlError(url: String): String? {
     val trimmed = url.trim()
@@ -57,9 +114,14 @@ fun webhookUrlError(url: String): String? {
  *
  * Every event uses this one builder, so there is only ever one item payload format on the wire.
  */
-fun buildWebhookPayload(event: String, list: ListEntity, items: List<ListItemEntity>): String {
+fun buildWebhookPayload(
+    event: String,
+    list: ListEntity,
+    items: List<ListItemEntity>,
+    settings: AppSettings
+): String {
     val itemsJson = JSONArray()
-    items.forEach { itemsJson.put(itemJson(list, it)) }
+    items.forEach { itemsJson.put(itemJson(list, it, settings)) }
     return JSONObject()
         .put("event", event)
         .put(
@@ -77,10 +139,13 @@ fun buildWebhookPayload(event: String, list: ListEntity, items: List<ListItemEnt
  * One item as the receiver sees it. Completion and actions are separate on purpose: `isCompleted`
  * says the item was processed in Listea, `actions` says what downstream automation should do with
  * it, and neither implies the other. Check/uncheck is never an action.
+ *
+ * Action wire values come from [settings] as they stand right now, not from whatever they were
+ * when the user tapped the chip.
  */
-private fun itemJson(list: ListEntity, item: ListItemEntity): JSONObject {
+private fun itemJson(list: ListEntity, item: ListItemEntity, settings: AppSettings): JSONObject {
     val actions = JSONArray()
-    itemActionNames(item).forEach { actions.put(it) }
+    itemActionNames(item, settings).forEach { actions.put(it) }
     return JSONObject()
         .put("id", item.id)
         .put("title", item.title)

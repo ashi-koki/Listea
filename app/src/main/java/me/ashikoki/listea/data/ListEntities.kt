@@ -80,11 +80,15 @@ data class ListItemEntity(
 )
 
 /**
- * The fixed set of downstream actions an item can carry. Declaration order is the order the
+ * The fixed set of downstream action slots an item can carry. Declaration order is the order the
  * webhook emits them in, so the array a receiver sees is deterministic and not dependent on how
  * the user toggled them.
+ *
+ * A slot's identity is the slot, not its name. The label the user sees and the value the webhook
+ * sends are both configuration, held in AppSettings and resolved when they are needed; these are
+ * only the factory values. That is what lets C1 be renamed without rewriting a single item row.
  */
-enum class ItemAction(val wireName: String, val label: String) {
+enum class ItemAction(val defaultWireName: String, val defaultLabel: String) {
     FAVORITE("favorite", "★"),
     CUSTOM1("cust1", "C1"),
     CUSTOM2("cust2", "C2");
@@ -95,16 +99,6 @@ enum class ItemAction(val wireName: String, val label: String) {
         CUSTOM2 -> item.custom2
     }
 }
-
-/** The enabled actions of [item] as wire names, in [ItemAction] order. Empty when none are set. */
-fun itemActionNames(item: ListItemEntity): List<String> =
-    ItemAction.entries.filter { it.isSetOn(item) }.map { it.wireName }
-
-/** Compact star-dot-C1 summary for a checklist row, or null when the item carries no actions. */
-fun itemActionLabel(item: ListItemEntity): String? =
-    ItemAction.entries.filter { it.isSetOn(item) }
-        .takeIf { it.isNotEmpty() }
-        ?.joinToString(" · ") { it.label }
 
 /**
  * Result of comparing a folder-backed list against a fresh scan of its source folder.

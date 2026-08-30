@@ -42,6 +42,16 @@ abstract class ListsDao {
     @Query("DELETE FROM lists WHERE id = :id")
     abstract suspend fun deleteList(id: Long)
 
+    /**
+     * Drops every list linked to one SAF root, whether it was created on the root itself or on a
+     * folder below it, and returns how many went. Items cascade with their list.
+     *
+     * Manual lists have no root and can never match. Lists linked to a *different* root are left
+     * alone: they have nothing to do with the folder being given up.
+     */
+    @Query("DELETE FROM lists WHERE sourceRootUri = :rootUri")
+    abstract suspend fun deleteListsForRoot(rootUri: String): Int
+
     @Query("UPDATE list_items SET title = :title WHERE id = :id")
     abstract suspend fun updateItemTitle(id: Long, title: String)
 
@@ -157,6 +167,8 @@ abstract class ListsDao {
         relativePath: String,
         files: List<ScannedFile>,
         replacedListIds: List<Long>,
+        webhookEnabled: Boolean,
+        webhookUrl: String,
         now: Long
     ): Long {
         replacedListIds.forEach { deleteList(it) }
@@ -164,6 +176,10 @@ abstract class ListsDao {
             ListEntity(
                 title = title,
                 createdAt = now,
+                // Copied from settings by the caller, once, at creation. The list owns it from
+                // here on and a later settings change never reaches back to it.
+                webhookEnabled = webhookEnabled,
+                webhookUrl = webhookUrl,
                 sourceRootUri = rootUri,
                 sourceRelativePath = relativePath
             )

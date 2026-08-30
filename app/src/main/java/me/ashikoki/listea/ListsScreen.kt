@@ -1,6 +1,7 @@
 package me.ashikoki.listea
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,6 +16,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
@@ -91,6 +93,9 @@ private fun ListsIndex(
     var creating by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<ListSummary?>(null) }
     var deleting by remember { mutableStateOf<ListSummary?>(null) }
+    var filter by rememberSaveable { mutableStateOf(ListFilter.All) }
+
+    val visible = remember(summaries, filter) { summaries.filter(filter::accepts) }
 
     Column(modifier.fillMaxSize()) {
         Row(
@@ -100,15 +105,28 @@ private fun ListsIndex(
             Text("Lists", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
             Button(onClick = { creating = true }) { Text("New list") }
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ListFilter.entries.forEach { option ->
+                FilterChip(
+                    selected = filter == option,
+                    onClick = { filter = option },
+                    label = { Text(option.label) }
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         HorizontalDivider()
 
-        if (summaries.isEmpty()) {
+        if (visible.isEmpty()) {
             Spacer(Modifier.height(16.dp))
-            Text("No lists yet", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                if (summaries.isEmpty()) "No lists yet" else "No lists in this filter",
+                style = MaterialTheme.typography.bodyMedium
+            )
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                items(summaries, key = { it.id }) { summary ->
+                items(visible, key = { it.id }) { summary ->
                     ListRow(
                         summary = summary,
                         onOpen = { onOpenList(summary.id) },
@@ -213,9 +231,30 @@ private fun ListRow(
     }
 }
 
-/** "3 / 5 complete", with a tick once the whole list is done. */
+/**
+ * Completion as a filter, which is the only place the words belong: the rows themselves just
+ * carry numbers.
+ */
+enum class ListFilter(val label: String) {
+    All("All"),
+    InProgress("In progress"),
+    Completed("Completed");
+
+    fun accepts(summary: ListSummary): Boolean = when (this) {
+        All -> true
+        InProgress -> !summary.isComplete
+        Completed -> summary.isComplete
+    }
+}
+
+/**
+ * "3 / 5", with a tick once the whole thing is done.
+ *
+ * Just the numbers: "complete" after every count reads as a status when it is only ever a unit,
+ * and completion already has its own marker and its own filter.
+ */
 fun progressLabel(completed: Int, total: Int, isComplete: Boolean): String =
-    "$completed / $total complete" + if (isComplete) " ✓" else ""
+    "$completed / $total" + if (isComplete) " ✓" else ""
 
 @Composable
 fun TextPromptDialog(

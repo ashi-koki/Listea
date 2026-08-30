@@ -63,7 +63,7 @@ fun buildFolderOwnership(
     for (item in items) {
         val itemPath = item.relativePath ?: continue
         val scopePath = scopePathById[item.listId] ?: continue
-        val rootRelative = if (scopePath.isEmpty()) itemPath else "$scopePath/$itemPath"
+        val rootRelative = rootRelativeItemPath(scopePath, itemPath)
         completion[item.listId to rootRelative] = item.isCompleted
 
         var folder = rootRelative.substringBeforeLast('/', "")
@@ -110,6 +110,44 @@ fun folderListStatus(ownership: FolderOwnership, folderPath: String): FolderList
     } ?: FolderListStatus.None
 }
 
+/**
+ * The three relationships the interface ever talks about.
+ *
+ * The internal model keeps saying Direct and Inherited, which describe *how* a list covers a
+ * folder; these are what the user is told, and they describe *what the folder is*. One mapping,
+ * used everywhere, so a folder can never read as one thing on a card and another in a header.
+ *
+ * A folder with lists only *below* it is [NONE]: being an ancestor of a list is not a
+ * relationship the folder itself has.
+ */
+enum class FolderType(val label: String) {
+    NONE("None"),
+    LIST("List"),
+    SUBLIST("Sublist")
+}
+
+fun folderTypeOf(status: FolderListStatus): FolderType = when (status) {
+    is FolderListStatus.None -> FolderType.NONE
+    is FolderListStatus.Direct -> FolderType.LIST
+    is FolderListStatus.Inherited -> FolderType.SUBLIST
+}
+
+/**
+ * Progress for a folder, or null when it has none to show.
+ *
+ * A List reports its own list's overall progress; a Sublist reports just its own subtree, which is
+ * the part of the ancestor list that actually lives here.
+ */
+fun folderProgressLabel(status: FolderListStatus): String? = when (status) {
+    is FolderListStatus.None -> null
+    is FolderListStatus.Direct -> scopeProgressLabel(status.scope)
+    is FolderListStatus.Inherited ->
+        progressLabel(status.subtreeCompleted, status.subtreeTotal, status.subtreeIsComplete)
+}
+
+/** Which list is involved, for a folder that has one. Display only. */
+fun folderOwnerTitle(status: FolderListStatus): String? = owningScope(status)?.title
+
 /** The list owning this folder, whether it owns it directly or through an ancestor. */
 fun owningScope(status: FolderListStatus): FolderListScope? = when (status) {
     is FolderListStatus.None -> null
@@ -122,11 +160,14 @@ fun scopeProgressLabel(scope: FolderListScope): String =
     progressLabel(scope.completedItems, scope.totalItems, scope.isComplete)
 
 /**
- * Webhook state of the list owning this folder, or null when nothing owns it.
- * Shares [webhookStatusLabel] with the Lists screen so both read identically.
+ * Webhook state of a folder that owns its list outright, or null.
+ *
+ * Deliberately null for a Sublist: the webhook belongs to the ancestor list, and repeating it on
+ * every folder underneath would suggest each one can deliver something of its own. One folder,
+ * one webhook, shown where it is actually configured.
  */
 fun statusWebhookLabel(status: FolderListStatus): String? {
-    val scope = owningScope(status) ?: return null
+    val scope = (status as? FolderListStatus.Direct)?.scope ?: return null
     return webhookStatusLabel(
         enabled = scope.webhookEnabled,
         lastDeliveryStatus = scope.lastDeliveryStatus,
