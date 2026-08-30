@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.util.Log
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.itemActionNames
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.InputStream
@@ -53,17 +54,12 @@ fun webhookUrlError(url: String): String? {
 /**
  * The webhook body. Timestamps are epoch milliseconds. This is a deliberately fixed shape:
  * it exposes the list and its items, and nothing about how they are stored.
+ *
+ * Every event uses this one builder, so there is only ever one item payload format on the wire.
  */
 fun buildWebhookPayload(event: String, list: ListEntity, items: List<ListItemEntity>): String {
     val itemsJson = JSONArray()
-    items.forEach { item ->
-        itemsJson.put(
-            JSONObject()
-                .put("id", item.id)
-                .put("title", item.title)
-                .put("isCompleted", item.isCompleted)
-        )
-    }
+    items.forEach { itemsJson.put(itemJson(list, it)) }
     return JSONObject()
         .put("event", event)
         .put(
@@ -76,6 +72,38 @@ fun buildWebhookPayload(event: String, list: ListEntity, items: List<ListItemEnt
         .put("items", itemsJson)
         .toString()
 }
+
+/**
+ * One item as the receiver sees it. Completion and actions are separate on purpose: `isCompleted`
+ * says the item was processed in Listea, `actions` says what downstream automation should do with
+ * it, and neither implies the other. Check/uncheck is never an action.
+ */
+private fun itemJson(list: ListEntity, item: ListItemEntity): JSONObject {
+    val actions = JSONArray()
+    itemActionNames(item).forEach { actions.put(it) }
+    return JSONObject()
+        .put("id", item.id)
+        .put("title", item.title)
+        .put("isCompleted", item.isCompleted)
+        .put("relativePath", webhookRelativePath(list, item) ?: JSONObject.NULL)
+        .put("actions", actions)
+}
+
+/**
+ * The item's path relative to the selected SAF synchronization root, e.g.
+ * `2026-07-11/bilibili/sub/a.jpg`: the list's root-relative folder path followed by the item's
+ * list-relative source path. Null for manual items, which have no source file at all; a fake path
+ * would be worse than none for a downstream tool.
+ */
+fun webhookRelativePath(list: ListEntity, item: ListItemEntity): String? {
+    val itemSegments = pathSegments(item.sourceRelativePath)
+    if (itemSegments.isEmpty()) return null
+    return (pathSegments(list.sourceRelativePath) + itemSegments).joinToString("/")
+}
+
+/** Splits on "/" and drops empty segments, so leading, trailing and doubled separators cannot survive. */
+private fun pathSegments(path: String?): List<String> =
+    path?.split('/')?.filter { it.isNotEmpty() }.orEmpty()
 
 /**
  * POSTs [jsonBody] to [url]. Blocking: call on an IO dispatcher.

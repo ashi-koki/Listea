@@ -67,8 +67,44 @@ data class ListItemEntity(
      * external tools move and re-sync files, and a completed review is worth more than the
      * current folder state.
      */
-    val sourceMissing: Boolean = false
+    val sourceMissing: Boolean = false,
+
+    /**
+     * Review actions: metadata for downstream automation, deliberately not completion state.
+     * Checking an item is not an action, and setting an action never checks anything. Stored as
+     * three flat columns rather than a tag table, because the set is fixed for now.
+     */
+    val isFavorite: Boolean = false,
+    val custom1: Boolean = false,
+    val custom2: Boolean = false
 )
+
+/**
+ * The fixed set of downstream actions an item can carry. Declaration order is the order the
+ * webhook emits them in, so the array a receiver sees is deterministic and not dependent on how
+ * the user toggled them.
+ */
+enum class ItemAction(val wireName: String, val label: String) {
+    FAVORITE("favorite", "★"),
+    CUSTOM1("cust1", "C1"),
+    CUSTOM2("cust2", "C2");
+
+    fun isSetOn(item: ListItemEntity): Boolean = when (this) {
+        FAVORITE -> item.isFavorite
+        CUSTOM1 -> item.custom1
+        CUSTOM2 -> item.custom2
+    }
+}
+
+/** The enabled actions of [item] as wire names, in [ItemAction] order. Empty when none are set. */
+fun itemActionNames(item: ListItemEntity): List<String> =
+    ItemAction.entries.filter { it.isSetOn(item) }.map { it.wireName }
+
+/** Compact star-dot-C1 summary for a checklist row, or null when the item carries no actions. */
+fun itemActionLabel(item: ListItemEntity): String? =
+    ItemAction.entries.filter { it.isSetOn(item) }
+        .takeIf { it.isNotEmpty() }
+        ?.joinToString(" · ") { it.label }
 
 /**
  * Result of comparing a folder-backed list against a fresh scan of its source folder.

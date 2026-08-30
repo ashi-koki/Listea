@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -62,6 +63,7 @@ import coil3.request.crossfade
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.ashikoki.listea.data.ItemAction
 import me.ashikoki.listea.data.ListItemEntity
 
 /** How far the card must travel before a swipe counts as navigation. */
@@ -265,19 +267,58 @@ fun ReviewScreen(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Text(
-                if (item.isCompleted) "Checked ✓" else "Not checked",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (item.isCompleted) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
+            ReviewActionRow(
+                item = item,
+                onToggleCompleted = { viewModel.setItemCompleted(item, it) },
+                onToggleAction = { action, enabled ->
+                    viewModel.setItemAction(item, action, enabled)
                 }
             )
             Text(
                 "Swipe left to check and continue · swipe right to go back",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * Completion toggle plus the three review actions, for the current item only.
+ *
+ * It lives below the card rather than on it, outside the Box that owns the horizontal drag
+ * detector, so a tap here is never seen by the swipe gesture and can never navigate.
+ *
+ * The completion chip goes through the same [ListsViewModel.setItemCompleted] path as the
+ * checkbox and the left swipe, so checking the last item here fires the completion webhook
+ * exactly as it would anywhere else. The action chips only persist a flag: no navigation, no
+ * completion change, no delivery.
+ */
+@Composable
+private fun ReviewActionRow(
+    item: ListItemEntity,
+    onToggleCompleted: (Boolean) -> Unit,
+    onToggleAction: (ItemAction, Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        FilterChip(
+            selected = item.isCompleted,
+            onClick = { onToggleCompleted(!item.isCompleted) },
+            label = { Text(if (item.isCompleted) "Checked" else "Not checked") }
+        )
+        // Fixed order, so the row never reshuffles as actions are toggled.
+        ItemAction.entries.forEach { action ->
+            val isSet = action.isSetOn(item)
+            FilterChip(
+                selected = isSet,
+                onClick = { onToggleAction(action, !isSet) },
+                label = { Text(action.label) }
             )
         }
     }

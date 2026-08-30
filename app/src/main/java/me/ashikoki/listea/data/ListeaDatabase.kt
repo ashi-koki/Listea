@@ -10,7 +10,7 @@ import androidx.sqlite.execSQL
 
 @Database(
     entities = [ListEntity::class, ListItemEntity::class],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -60,6 +60,24 @@ abstract class ListeaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * V3.5 adds the per-item review actions. Purely additive with a false default, so every
+         * existing item survives unchanged and simply carries no actions.
+         */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE list_items ADD COLUMN isFavorite INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execSQL(
+                    "ALTER TABLE list_items ADD COLUMN custom1 INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execSQL(
+                    "ALTER TABLE list_items ADD COLUMN custom2 INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
         @Volatile
         private var instance: ListeaDatabase? = null
 
@@ -69,7 +87,13 @@ abstract class ListeaDatabase : RoomDatabase() {
                     context.applicationContext,
                     ListeaDatabase::class.java,
                     "listea.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                ).addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6
+                )
                     .build()
                     .also { instance = it }
             }

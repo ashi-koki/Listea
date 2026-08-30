@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.ashikoki.listea.data.FolderDiff
+import me.ashikoki.listea.data.ItemAction
 import me.ashikoki.listea.data.ListDetail
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
@@ -125,6 +126,15 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             item.listId,
             dao.setItemCompleted(item.listId, item.id, completed, now())
         )
+    }
+
+    /**
+     * Toggles one review action. Persisted immediately and nothing else: completion is untouched,
+     * so this never delivers a webhook. The value simply travels with the item into the next
+     * list.completed payload.
+     */
+    fun setItemAction(item: ListItemEntity, action: ItemAction, enabled: Boolean) = launchDb {
+        dao.setItemAction(item.id, action, enabled)
     }
 
     fun deleteItem(item: ListItemEntity) = launchDb {

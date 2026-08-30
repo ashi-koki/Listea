@@ -48,6 +48,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.itemActionLabel
 
 @Composable
 fun ListDetailScreen(
@@ -444,6 +445,14 @@ private fun ItemRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
+                )
+            }
+            // Read-only here: actions are set in Review, this row just reports them.
+            itemActionLabel(item)?.let { actions ->
+                Text(
+                    actions,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
                 )
             }
             // Subtle: the item stays checkable and is never hidden or removed.

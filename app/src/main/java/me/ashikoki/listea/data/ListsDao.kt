@@ -277,6 +277,17 @@ abstract class ListsDao {
         )
     }
 
+    /**
+     * Sets one review action on one item. Action metadata only: it deliberately does not call
+     * [refreshCompletion] and returns nothing, so it can never report a completion transition and
+     * therefore can never cause a webhook to be delivered.
+     */
+    suspend fun setItemAction(itemId: Long, action: ItemAction, enabled: Boolean) = when (action) {
+        ItemAction.FAVORITE -> setItemFavorite(itemId, enabled)
+        ItemAction.CUSTOM1 -> setItemCustom1(itemId, enabled)
+        ItemAction.CUSTOM2 -> setItemCustom2(itemId, enabled)
+    }
+
     @Query("UPDATE lists SET reviewCurrentItemId = :itemId WHERE id = :id")
     abstract suspend fun setReviewPosition(id: Long, itemId: Long?)
 
@@ -354,6 +365,15 @@ abstract class ListsDao {
 
     @Query("UPDATE list_items SET isCompleted = :completed WHERE id = :id")
     protected abstract suspend fun updateItemCompleted(id: Long, completed: Boolean)
+
+    @Query("UPDATE list_items SET isFavorite = :enabled WHERE id = :id")
+    protected abstract suspend fun setItemFavorite(id: Long, enabled: Boolean)
+
+    @Query("UPDATE list_items SET custom1 = :enabled WHERE id = :id")
+    protected abstract suspend fun setItemCustom1(id: Long, enabled: Boolean)
+
+    @Query("UPDATE list_items SET custom2 = :enabled WHERE id = :id")
+    protected abstract suspend fun setItemCustom2(id: Long, enabled: Boolean)
 
     @Query("SELECT COALESCE(MAX(sortOrder), -1) FROM list_items WHERE listId = :listId")
     protected abstract suspend fun maxSortOrder(listId: Long): Int
