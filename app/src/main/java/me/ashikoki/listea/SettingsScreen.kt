@@ -1,21 +1,30 @@
 package me.ashikoki.listea
 
 import android.content.Intent
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -31,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,19 +59,19 @@ import kotlinx.coroutines.withContext
  *
  * Switches persist on the spot. Text fields persist when they lose focus or the user presses Done,
  * so a half-typed URL is never written and DataStore is not hit on every keystroke.
+ *
+ * V4.3 puts each group in the same [SectionCard] the management screens use, so this reads as a
+ * page of the app rather than the settings form it used to be. One scroll surface, as everywhere.
  */
 @Composable
 fun SettingsScreen(
     modifier: Modifier,
-    viewModel: ListsViewModel = viewModel(),
-    onBack: () -> Unit
+    viewModel: ListsViewModel = viewModel()
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val rootChangePreview by viewModel.rootChangePreview.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val store = remember { FolderStore(context) }
-
-    BackHandler { onBack() }
 
     // Re-read after a change so the label follows the newly granted root.
     var rootGeneration by remember { mutableStateOf(0) }
@@ -106,102 +116,115 @@ fun SettingsScreen(
         if (current == null) pickFolder.launch(null) else viewModel.previewRootChange(current.toString())
     }
 
+    // One scroll surface for the whole page; no subsection scrolls on its own.
     Column(
-        modifier
+        modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .padding(horizontal = ListeaDimens.PagePadding),
+        verticalArrangement = Arrangement.spacedBy(ListeaDimens.SectionGap)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("‹ Back") }
-            Text("Settings", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(ListeaDimens.CompactGap))
+
+        SectionCard(title = "Storage") {
+            InfoActionsRow(
+                info = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+                    ) {
+                        Icon(
+                            Icons.Filled.Folder,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(ListeaDimens.IconSize)
+                        )
+                        Text("Root folder", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Text(
+                        rootLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                actions = {
+                    Button(onClick = { startFolderChange() }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (rootUri == null) "Select folder" else "Change folder", maxLines = 1)
+                    }
+                }
+            )
+            // The lists that go are the ones linked to the folder being replaced. Nothing is
+            // rebound to the new root, and manual lists are never touched.
+            HelperText("Changing folder deletes the Lists linked to the current one. Manual Lists are kept.")
         }
 
-        SettingsGroup("Storage") {
-            Text("Root folder", style = MaterialTheme.typography.bodyMedium)
-            Text(
-                rootLabel,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = { startFolderChange() }) {
-                Text(if (rootUri == null) "Select folder" else "Change folder")
-            }
-            Text(
-                "Changing folder deletes the lists linked to the current one. Manual lists are " +
-                    "kept.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        SettingsGroup("Review") {
+        SectionCard(title = "Review") {
             SwitchRow(
                 label = "Enable Quick Review in Folder",
+                icon = Icons.Filled.Visibility,
                 checked = settings.folderQuickReviewEnabled,
                 onCheckedChange = { viewModel.setFolderQuickReviewEnabled(it) }
             )
-            Text(
+            HelperText(
                 "Off turns the Folder tab into a plain browser and gallery. Lists keep their " +
-                    "items, completion and actions.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                    "items, completion and actions."
             )
 
-            Spacer(Modifier.height(12.dp))
-            Text("Custom action 1", style = MaterialTheme.typography.bodyMedium)
-            SettingsTextField(
-                label = "Display name",
-                value = settings.custom1DisplayName,
-                onCommit = { viewModel.setCustom1DisplayName(it) }
+            CustomActionFields(
+                title = "Custom action 1",
+                displayName = settings.custom1DisplayName,
+                webhookValue = settings.custom1WebhookValue,
+                onDisplayNameCommit = { viewModel.setCustom1DisplayName(it) },
+                onWebhookValueCommit = { viewModel.setCustom1WebhookValue(it) }
             )
-            SettingsTextField(
-                label = "Webhook value",
-                value = settings.custom1WebhookValue,
-                onCommit = { viewModel.setCustom1WebhookValue(it) }
+            CustomActionFields(
+                title = "Custom action 2",
+                displayName = settings.custom2DisplayName,
+                webhookValue = settings.custom2WebhookValue,
+                onDisplayNameCommit = { viewModel.setCustom2DisplayName(it) },
+                onWebhookValueCommit = { viewModel.setCustom2WebhookValue(it) }
             )
-
-            Spacer(Modifier.height(12.dp))
-            Text("Custom action 2", style = MaterialTheme.typography.bodyMedium)
-            SettingsTextField(
-                label = "Display name",
-                value = settings.custom2DisplayName,
-                onCommit = { viewModel.setCustom2DisplayName(it) }
-            )
-            SettingsTextField(
-                label = "Webhook value",
-                value = settings.custom2WebhookValue,
-                onCommit = { viewModel.setCustom2WebhookValue(it) }
-            )
-            Text(
-                "Renaming changes what you see and what future webhooks send. Items already " +
-                    "marked keep their selection.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            HelperText(
+                "The display name is what you see on the chips. The webhook value is what future " +
+                    "payloads send. Items already marked keep their selection."
             )
         }
 
-        SettingsGroup("Media") {
+        SectionCard(title = "Media and review behaviour") {
             SwitchRow(
                 label = "Play videos automatically",
+                icon = Icons.Filled.PlayArrow,
                 checked = settings.videoAutoplay,
                 onCheckedChange = { viewModel.setVideoAutoplay(it) }
             )
             SwitchRow(
                 label = "Start videos muted",
+                icon = Icons.AutoMirrored.Filled.VolumeOff,
                 checked = settings.videoStartMuted,
                 onCheckedChange = { viewModel.setVideoStartMuted(it) }
             )
-            Text(
-                "Applies to Review, Quick Review and the folder viewer.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            SwitchRow(
+                label = "Remember review position",
+                icon = Icons.Outlined.Bookmark,
+                checked = settings.rememberReviewPosition,
+                onCheckedChange = { viewModel.setRememberReviewPosition(it) }
+            )
+            SwitchRow(
+                label = "Auto-check list freshness on entry",
+                icon = Icons.Filled.Refresh,
+                checked = settings.autoCheckSourceFreshness,
+                onCheckedChange = { viewModel.setAutoCheckSourceFreshness(it) }
+            )
+            HelperText(
+                "Resuming applies to full Review only — Quick Review always starts at the first " +
+                    "unchecked item. With auto-checking off, a List says \"Not checked\" until " +
+                    "you use Update from folder."
             )
         }
 
-        SettingsGroup("Webhook") {
+        SectionCard(title = "Webhook") {
             SwitchRow(
                 label = "Default enabled",
                 checked = settings.defaultWebhookEnabled,
@@ -213,24 +236,10 @@ fun SettingsScreen(
                 onCommit = { viewModel.setDefaultWebhookUrl(it) },
                 allowEmpty = true
             )
-            Text(
-                "Copied into new lists when they are created. Existing lists are never changed.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            HelperText("Copied into new Lists when they are created. Existing Lists are never changed.")
         }
 
-        SettingsGroup("Source updates") {
-            InfoRow("Auto-check source changes", "On")
-            InfoRow("Auto-update list", "Coming later")
-            Text(
-                "Listea checks a list's source folder when you open it, and never changes the " +
-                    "list without you asking.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(ListeaDimens.SectionGap))
     }
 
     RootChangeDialog(
@@ -272,7 +281,7 @@ private fun RootChangeDialog(
                             "including any created in its subfolders. Their items, checked " +
                             "state and actions go with them. This cannot be undone."
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
                     pending.titles.take(PREVIEW_TITLES).forEach { title ->
                         Text(
                             "• $title",
@@ -288,7 +297,7 @@ private fun RootChangeDialog(
                         )
                     }
                 }
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(ListeaDimens.RowGap))
                 Text(
                     "Manual lists, and lists linked to any other folder, are kept. Nothing is " +
                         "deleted unless you go on to choose a new folder.",
@@ -309,46 +318,96 @@ private const val PREVIEW_TITLES = 5
 private fun countOf(count: Int, noun: String): String =
     "$count $noun" + if (count == 1) "" else "s"
 
+/**
+ * One custom action's two fields: what it is called, and what it sends.
+ *
+ * Side by side where both stay readable, stacked where they would not. The threshold is about the
+ * fields rather than the device: a text field narrower than this stops showing enough of its own
+ * value to edit it, and two cramped fields are worse than two full-width ones.
+ */
 @Composable
-private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
-    Spacer(Modifier.height(16.dp))
-    HorizontalDivider()
-    Spacer(Modifier.height(8.dp))
-    Text(
-        title,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.primary
-    )
-    Spacer(Modifier.height(4.dp))
-    Column { content() }
-}
+private fun CustomActionFields(
+    title: String,
+    displayName: String,
+    webhookValue: String,
+    onDisplayNameCommit: (String) -> Unit,
+    onWebhookValueCommit: (String) -> Unit
+) {
+    Spacer(Modifier.height(ListeaDimens.RowGap))
+    Text(title, style = MaterialTheme.typography.titleSmall)
 
-@Composable
-private fun SwitchRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth >= CustomActionSideBySideMinWidth) {
+            Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)) {
+                SettingsTextField(
+                    label = "Display name",
+                    value = displayName,
+                    onCommit = onDisplayNameCommit,
+                    modifier = Modifier.weight(1f)
+                )
+                SettingsTextField(
+                    label = "Webhook value",
+                    value = webhookValue,
+                    onCommit = onWebhookValueCommit,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        } else {
+            Column {
+                SettingsTextField(
+                    label = "Display name",
+                    value = displayName,
+                    onCommit = onDisplayNameCommit
+                )
+                SettingsTextField(
+                    label = "Webhook value",
+                    value = webhookValue,
+                    onCommit = onWebhookValueCommit
+                )
+            }
+        }
     }
 }
 
-/** Static state that V3.8 reports but does not offer to change. */
+/** Two 150dp fields and the gap between them: below this a field stops showing enough to edit. */
+private val CustomActionSideBySideMinWidth = 308.dp
+
+/** The quiet line under a control that explains it, in one place so they all match. */
 @Composable
-private fun InfoRow(label: String, value: String) {
+private fun HelperText(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+@Composable
+private fun SwitchRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    icon: ImageVector? = null
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
+        icon?.let {
+            Icon(
+                it,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(ListeaDimens.IconSize)
+            )
+        }
         Text(
-            value,
+            label,
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            modifier = Modifier.weight(1f)
         )
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
@@ -364,6 +423,7 @@ private fun SettingsTextField(
     label: String,
     value: String,
     onCommit: (String) -> Unit,
+    modifier: Modifier = Modifier,
     allowEmpty: Boolean = false
 ) {
     // Seeded per stored value so an external change lands, without fighting the keyboard.
@@ -377,7 +437,7 @@ private fun SettingsTextField(
     OutlinedTextField(
         value = text,
         onValueChange = { text = it },
-        label = { Text(label) },
+        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         singleLine = true,
         isError = error != null,
         supportingText = error?.let { { Text(it) } },
@@ -385,7 +445,7 @@ private fun SettingsTextField(
             imeAction = ImeAction.Done
         ),
         keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { commit() }),
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .onFocusChanged { if (!it.isFocused) commit() }
     )

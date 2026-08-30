@@ -155,7 +155,7 @@ fun owningScope(status: FolderListStatus): FolderListScope? = when (status) {
     is FolderListStatus.Inherited -> status.scope
 }
 
-/** "7 / 18 complete", with a tick once the whole list is done. */
+/** "7 / 18", with a tick once the whole list is done. */
 fun scopeProgressLabel(scope: FolderListScope): String =
     progressLabel(scope.completedItems, scope.totalItems, scope.isComplete)
 

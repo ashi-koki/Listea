@@ -10,26 +10,37 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Tab
-import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,10 +50,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -62,80 +75,100 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            ListeaTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    ListeaApp(modifier = Modifier.padding(innerPadding))
-                }
-            }
+            // The scaffold lives in ListeaApp, which needs to know whether a nested screen is open
+            // before it can decide what chrome to show.
+            ListeaTheme { ListeaApp() }
         }
     }
 }
 
-private enum class MainTab(val label: String) { Folder("Folder"), Lists("Lists") }
-
-/** Top level of the app: the app name, a Folder/Lists switch, and the selected screen. */
+/**
+ * The app shell: three top-level destinations, and the nested screens reached from them.
+ *
+ * The nested flags live here rather than inside the screens that render them, because the shell
+ * is what has to know when to take its chrome away. The *rendering* stays where it was: the file
+ * viewer needs the folder listing FolderScreen holds, and Quick Review returns to the exact
+ * browsing stack it was launched from, so both are still drawn by FolderScreen and both keep
+ * working across rotation.
+ */
 @Composable
 fun ListeaApp(
     modifier: Modifier = Modifier,
     listsViewModel: ListsViewModel = viewModel()
 ) {
-    var tab by rememberSaveable { mutableStateOf(MainTab.Folder) }
-    var requestedListId by rememberSaveable { mutableStateOf<Long?>(null) }
-    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var destination by rememberSaveable { mutableStateOf(TopLevelDestination.Folder) }
 
-    if (showSettings) {
-        // A destination rather than a third tab: configuration is not equal in weight to the two
-        // screens the app is actually for. Leaving it remounts the Folder screen, which is how a
-        // newly chosen root takes effect.
-        SettingsScreen(
-            modifier = modifier.padding(16.dp),
-            viewModel = listsViewModel,
-            onBack = { showSettings = false }
-        )
-        WebhookNoticeDialog(listsViewModel)
-        return
+    // Nested destinations, hoisted purely so the shell can tell whether one is open.
+    var openListId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var reviewListId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var quickReview by rememberSaveable(stateSaver = QuickReviewTargetSaver) {
+        mutableStateOf<QuickReviewTarget?>(null)
+    }
+    var viewingFileUri by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Which folder the browser is standing in, owned here rather than by FolderScreen itself.
+    // FolderScreen is composed only while Folder is the selected destination, so anything it
+    // remembers depends on the destination switch handing that state back; ListeaApp is never
+    // taken out of the composition, so state held here cannot be dropped by a trip through
+    // Lists or Settings, however that switch is implemented.
+    var browsedStack by rememberSaveable(stateSaver = DirStackSaver) {
+        mutableStateOf(emptyList<DirRef>())
     }
 
-    Column(modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Listea",
-                style = MaterialTheme.typography.headlineMedium,
-                modifier = Modifier.weight(1f)
-            )
-            IconButton(onClick = { showSettings = true }) {
-                Text("⚙", style = MaterialTheme.typography.titleLarge)
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-        PrimaryTabRow(selectedTabIndex = tab.ordinal) {
-            MainTab.entries.forEach { entry ->
-                Tab(
-                    selected = tab == entry,
-                    onClick = { tab = entry },
-                    text = { Text(entry.label) }
+    val nested = openListId != null || reviewListId != null ||
+        quickReview != null || viewingFileUri != null
+
+    // Android convention for a bottom bar: back from a secondary destination returns to the first
+    // one rather than leaving the app. Disabled while nested, so the nested screens keep their own.
+    BackHandler(enabled = !nested && destination != TopLevelDestination.Folder) {
+        destination = TopLevelDestination.Folder
+    }
+
+    // Each destination keeps its own saved state while the other two are off screen. The `when`
+    // below only ever composes one of them, so without a holder the two that are not showing are
+    // forgotten along with everything they remembered: switching to Lists and back landed on the
+    // selected root instead of the folder being browsed, and a trip to Settings reset the Lists
+    // filter to All. The holder hands each screen its state back when it returns.
+    val destinationState = rememberSaveableStateHolder()
+
+    ListeaTopLevelScaffold(
+        destination = destination,
+        onSelectDestination = { destination = it },
+        showChrome = !nested,
+        modifier = modifier
+    ) { contentModifier ->
+        destinationState.SaveableStateProvider(destination) {
+            when (destination) {
+                TopLevelDestination.Folder -> FolderScreen(
+                    modifier = contentModifier,
+                    quickReview = quickReview,
+                    onQuickReviewChange = { quickReview = it },
+                    viewingFileUri = viewingFileUri,
+                    onViewFileChange = { viewingFileUri = it },
+                    onOpenList = { listId ->
+                        openListId = listId
+                        destination = TopLevelDestination.Lists
+                    },
+                    onOpenSettings = { destination = TopLevelDestination.Settings },
+                    browsedStack = browsedStack,
+                    onBrowsedStackChange = { browsedStack = it },
+                    listsViewModel = listsViewModel
+                )
+
+                TopLevelDestination.Lists -> ListsScreen(
+                    modifier = contentModifier,
+                    viewModel = listsViewModel,
+                    openListId = openListId,
+                    onOpenListChange = { openListId = it },
+                    reviewListId = reviewListId,
+                    onReviewListChange = { reviewListId = it }
+                )
+
+                TopLevelDestination.Settings -> SettingsScreen(
+                    modifier = contentModifier,
+                    viewModel = listsViewModel
                 )
             }
-        }
-        val screenModifier = Modifier.weight(1f).padding(16.dp)
-        when (tab) {
-            MainTab.Folder -> FolderScreen(
-                modifier = screenModifier,
-                onOpenList = { listId ->
-                    requestedListId = listId
-                    tab = MainTab.Lists
-                },
-                onOpenSettings = { showSettings = true }
-            )
-
-            MainTab.Lists -> ListsScreen(
-                modifier = screenModifier,
-                requestedListId = requestedListId,
-                onRequestConsumed = { requestedListId = null }
-            )
         }
     }
 
@@ -162,7 +195,7 @@ private fun WebhookNoticeDialog(viewModel: ListsViewModel) {
         text = {
             Column {
                 Text(current.listTitle, style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(ListeaDimens.RowGap))
                 Text(
                     current.outcomeLabel,
                     style = MaterialTheme.typography.bodyMedium,
@@ -174,7 +207,7 @@ private fun WebhookNoticeDialog(viewModel: ListsViewModel) {
                         NoticeOutcome.DISABLED -> MaterialTheme.colorScheme.onSurfaceVariant
                     }
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(ListeaDimens.RowGap))
                 Text(
                     buildList {
                         add(current.eventLabel)
@@ -226,8 +259,14 @@ private sealed interface FolderUiState {
 @Composable
 fun FolderScreen(
     modifier: Modifier = Modifier,
+    quickReview: QuickReviewTarget? = null,
+    onQuickReviewChange: (QuickReviewTarget?) -> Unit = {},
+    viewingFileUri: String? = null,
+    onViewFileChange: (String?) -> Unit = {},
     onOpenList: (Long) -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    browsedStack: List<DirRef> = emptyList(),
+    onBrowsedStackChange: (List<DirRef>) -> Unit = {},
     listsViewModel: ListsViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -237,11 +276,6 @@ fun FolderScreen(
     val scope = rememberCoroutineScope()
     val load = remember { LoadJob() }
     var state by remember { mutableStateOf<FolderUiState>(FolderUiState.Loading) }
-
-    // The contents are re-read on every entry, but *where* the user was is worth keeping.
-    var browsedStack by rememberSaveable(stateSaver = DirStackSaver) {
-        mutableStateOf(emptyList<DirRef>())
-    }
 
     /**
      * Shows the last directory of [stack]. If it can no longer be read (another app deleted it
@@ -270,14 +304,16 @@ fun FolderScreen(
                 // Keep the displayed name in sync with what the provider reports.
                 val shown = path.dropLast(1) + path.last().copy(name = contents.folderName)
                 state = FolderUiState.Browsing(stack = shown, contents = contents)
-                browsedStack = shown
+                // The contents are re-read on every entry, but *where* the user was is worth
+                // keeping, so the position goes back to the shell that outlives this screen.
+                onBrowsedStackChange(shown)
                 return
             }
             if (path.size == 1) break
             path = path.dropLast(1)
         }
         store.clear()
-        browsedStack = emptyList()
+        onBrowsedStackChange(emptyList())
         state = FolderUiState.NoFolder("That folder is no longer accessible. Please choose it again.")
     }
 
@@ -302,14 +338,9 @@ fun FolderScreen(
 
     LaunchedEffect(Unit) { open(startingStack()) }
 
-    // Quick Review lives inside this screen rather than replacing it, so the browsing stack — a
-    // plain remember — survives and exiting lands back on the same folder.
-    var quickReview by rememberSaveable(stateSaver = QuickReviewTargetSaver) {
-        mutableStateOf<QuickReviewTarget?>(null)
-    }
-    // The open file is remembered by URI rather than by entry: the entry objects come from a
-    // directory read that has to happen again after a rotation anyway.
-    var viewingFileUri by rememberSaveable { mutableStateOf<String?>(null) }
+    // Quick Review and the file viewer are still drawn here, so the browsing stack survives and
+    // exiting lands back on the same folder. Only their on/off state is owned by the shell, which
+    // needs it to hide the bottom navigation.
     val quickReviewRequest by listsViewModel.quickReviewRequest.collectAsStateWithLifecycle()
 
     // Another app (FolderSync, a file manager, ...) may change the folder while we are backgrounded,
@@ -331,7 +362,7 @@ fun FolderScreen(
         when (val request = quickReviewRequest) {
             is QuickReviewRequest.Ready -> {
                 if (request.folderPath == herePath) {
-                    quickReview = QuickReviewTarget(request.listId, request.folderPath)
+                    onQuickReviewChange(QuickReviewTarget(request.listId, request.folderPath))
                 }
                 listsViewModel.dismissQuickReviewRequest()
             }
@@ -361,7 +392,7 @@ fun FolderScreen(
             modifier = modifier,
             viewModel = listsViewModel,
             target = reviewing,
-            onExit = { quickReview = null }
+            onExit = { onQuickReviewChange(null) }
         )
         return
     }
@@ -371,6 +402,16 @@ fun FolderScreen(
     // has been read again.
     val folderFiles = browsing?.contents?.entries.orEmpty().filterNot { it.isDirectory }
     val openFile = viewingFileUri?.let { uri -> folderFiles.firstOrNull { it.uri.toString() == uri } }
+
+    // A file can be deleted by another app between opening it and the folder being re-read. Give
+    // the viewer up rather than leave the shell believing a nested screen is still open, which
+    // would strip the bottom navigation off a folder page that has no way back.
+    LaunchedEffect(viewingFileUri, folderFiles) {
+        if (viewingFileUri != null && browsing != null && openFile == null) {
+            onViewFileChange(null)
+        }
+    }
+
     if (openFile != null) {
         FileViewerScreen(
             modifier = modifier,
@@ -378,36 +419,43 @@ fun FolderScreen(
             // the browser. Directories are not files to page through.
             files = folderFiles,
             initial = openFile,
-            detailOf = { fileDetail(it) },
+            // Where these files sit, for the Info sheet. The viewer shows one folder's direct
+            // files, so this is the same path for every card in it.
+            folderPath = herePath.orEmpty(),
             settings = settings,
-            onClose = { viewingFileUri = null }
+            onClose = { onViewFileChange(null) }
         )
         return
     }
 
     Column(modifier = modifier.fillMaxSize()) {
         when (val current = state) {
-            is FolderUiState.Loading -> CircularProgressIndicator()
+            is FolderUiState.Loading -> Box(
+                Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) { CircularProgressIndicator() }
 
             // Nothing is chosen for the user and no picker opens by itself: the first thing a
             // new install sees is an explanation of where to start.
-            is FolderUiState.NoFolder -> {
+            is FolderUiState.NoFolder -> Column(
+                Modifier.padding(ListeaDimens.PagePadding)
+            ) {
                 Text("No folder selected", style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(ListeaDimens.CompactGap))
                 Text(
                     "Select a folder in Settings to get started.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 current.message?.let {
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
                     Text(
                         it,
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(ListeaDimens.SectionGap))
                 Button(onClick = onOpenSettings) { Text("Open Settings") }
             }
 
@@ -445,64 +493,101 @@ fun FolderScreen(
                     )
                 }
 
-                Breadcrumb(
-                    stack = current.stack,
-                    onNavigate = { depth -> open(current.stack.take(depth)) }
-                )
-                // Display only: nothing in here is tappable. Every action lives in the row below.
-                CurrentFolderInfo(
-                    entries = current.contents.entries,
-                    status = statusOf(here)
-                )
-                Spacer(Modifier.height(8.dp))
-                CurrentFolderActions(
-                    status = statusOf(here),
-                    quickReviewEnabled = quickReviewEnabled,
-                    checkingSource = quickReviewRequest is QuickReviewRequest.Checking,
-                    onRefresh = { open(current.stack) },
-                    onOpenList = onOpenList,
-                    onCreateList = {
-                        requestList(here, current.stack.last().uri, current.stack.last().name)
-                    },
-                    onQuickReview = { listId ->
-                        listsViewModel.requestQuickReview(listId, here)
+                // Split once per listing rather than per row, so the two sections below can be
+                // headed separately without testing isDirectory on every item.
+                val directories = remember(current.contents.entries) {
+                    current.contents.entries.filter { it.isDirectory }
+                }
+                val files = remember(current.contents.entries) {
+                    current.contents.entries.filterNot { it.isDirectory }
+                }
+
+                // One scroll surface for the page. The breadcrumb, the folder summary and the
+                // action row scroll away with everything else rather than pinning most of the
+                // screen open above a small list viewport — which is what left almost nothing
+                // usable in landscape.
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        horizontal = ListeaDimens.PagePadding,
+                        vertical = ListeaDimens.RowGap
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+                ) {
+                    item {
+                        Breadcrumb(
+                            stack = current.stack,
+                            onNavigate = { depth -> open(current.stack.take(depth)) }
+                        )
                     }
-                )
-                Spacer(Modifier.height(12.dp))
-                HorizontalDivider()
-                if (current.contents.entries.isEmpty()) {
-                    Spacer(Modifier.height(16.dp))
-                    Text("This folder is empty", style = MaterialTheme.typography.bodyMedium)
-                } else {
-                    LazyColumn(Modifier.fillMaxSize()) {
-                        items(current.contents.entries, key = { it.uri }) { entry ->
-                            if (entry.isDirectory) {
-                                val path = childRelativePath(here, entry.name)
-                                FolderCard(
-                                    entry = entry,
-                                    status = statusOf(path),
-                                    onNavigate = {
-                                        open(current.stack + DirRef(entry.uri, entry.name))
-                                    }
-                                )
-                            } else {
-                                // A file's checked state comes from whichever list owns the
-                                // folder it sits in, direct or inherited — and is hidden
-                                // entirely when Folder review integration is switched off, which
-                                // changes what is shown and nothing that is stored.
-                                val owner = owningScope(statusOf(here))
-                                    .takeIf { quickReviewEnabled }
-                                FileRow(
-                                    entry = entry,
-                                    isChecked = owner?.let {
-                                        ownership.itemCompletion[
-                                            it.id to childRelativePath(here, entry.name)
-                                        ]
-                                    },
-                                    onOpen = { viewingFileUri = entry.uri.toString() }
-                                )
-                                HorizontalDivider()
+                    item {
+                        CurrentFolderCard(
+                            entries = current.contents.entries,
+                            status = statusOf(here),
+                            quickReviewEnabled = quickReviewEnabled,
+                            checkingSource = quickReviewRequest is QuickReviewRequest.Checking,
+                            onRefresh = { open(current.stack) },
+                            onOpenList = onOpenList,
+                            onCreateList = {
+                                requestList(here, current.stack.last().uri, current.stack.last().name)
+                            },
+                            onQuickReview = { listId ->
+                                listsViewModel.requestQuickReview(listId, here)
                             }
+                        )
+                    }
+
+                    if (current.contents.entries.isEmpty()) {
+                        item {
+                            Spacer(Modifier.height(ListeaDimens.SectionGap))
+                            Text(
+                                "This folder is empty",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+
+                    if (directories.isNotEmpty()) {
+                        item {
+                            SectionHeader(
+                                "Directories",
+                                Modifier.padding(top = ListeaDimens.RowGap)
+                            )
+                        }
+                        items(directories, key = { it.uri }) { entry ->
+                            val path = childRelativePath(here, entry.name)
+                            FolderCard(
+                                entry = entry,
+                                status = statusOf(path),
+                                onNavigate = {
+                                    open(current.stack + DirRef(entry.uri, entry.name))
+                                }
+                            )
+                        }
+                    }
+
+                    if (files.isNotEmpty()) {
+                        item {
+                            SectionHeader(
+                                "Files",
+                                Modifier.padding(top = ListeaDimens.RowGap)
+                            )
+                        }
+                        // A file's checked state comes from whichever list owns the folder it
+                        // sits in, direct or inherited — and is hidden entirely when Folder
+                        // review integration is switched off, which changes what is shown and
+                        // nothing that is stored.
+                        val owner = owningScope(statusOf(here)).takeIf { quickReviewEnabled }
+                        items(files, key = { it.uri }) { entry ->
+                            FileRow(
+                                entry = entry,
+                                isChecked = owner?.let {
+                                    ownership.itemCompletion[
+                                        it.id to childRelativePath(here, entry.name)
+                                    ]
+                                },
+                                onOpen = { onViewFileChange(entry.uri.toString()) }
+                            )
                         }
                     }
                 }
@@ -519,7 +604,7 @@ fun FolderScreen(
             text = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator()
-                    Spacer(Modifier.width(16.dp))
+                    Spacer(Modifier.width(ListeaDimens.SectionGap))
                     Text("Looking for files in this folder and everything below it.")
                 }
             },
@@ -543,9 +628,9 @@ fun FolderScreen(
                             " (" + request.fileCount + " files) will replace " +
                             countLabel(count, "existing list") + ":"
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
                     request.replacedTitles.forEach { title -> Text("- $title") }
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
                     Text(
                         "Their items, checked state, actions and webhook settings are replaced.",
                         style = MaterialTheme.typography.bodySmall,
@@ -572,7 +657,6 @@ fun FolderScreen(
     }
 }
 
-/** Compact status for the folder currently open, alongside its entry count. */
 /**
  * The path as a row of tappable ancestors. This is how you go up: every segment above the one you
  * are in navigates straight to it, reusing the same browsing stack the rest of the screen uses,
@@ -616,54 +700,20 @@ private fun Breadcrumb(stack: List<DirRef>, onNavigate: (Int) -> Unit) {
 }
 
 /**
- * Everything the current folder *is*, and nothing it can *do*.
+ * What this folder is on the left, and what can be done with it on the right.
  *
- * Strictly display: no element here is clickable, so a status can never be mistaken for a button.
- * Counts are the folder's direct children only — the listing already in memory — and never a
- * recursive walk.
+ * The information is strictly display: nothing in it is tappable, so a status can never be
+ * mistaken for a button. The counts are the folder's direct children only — the listing already
+ * in memory — and never a recursive walk.
+ *
+ * Four short status lines do not need a phone's full width, so the actions sit beside them rather
+ * than under them, and drop underneath only when the width genuinely cannot hold both. Either way
+ * every action valid here is rendered: V4.0 put the same four in one unbreakable Row and a narrow
+ * portrait screen cut the last of them off the right edge.
  */
 @Composable
-private fun CurrentFolderInfo(entries: List<FolderEntry>, status: FolderListStatus) {
-    Column(Modifier.fillMaxWidth()) {
-        Text(folderCountsLabel(entries), style = MaterialTheme.typography.bodyMedium)
-        Text(
-            folderTypeOf(status).label,
-            style = MaterialTheme.typography.bodySmall,
-            color = statusColor(status)
-        )
-        folderProgressLabel(status)?.let { progress ->
-            val owner = folderOwnerTitle(status)
-            Text(
-                if (owner != null) "$progress · $owner" else progress,
-                style = MaterialTheme.typography.bodySmall,
-                color = statusDetailColor(status),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        // Only a folder that owns its list outright has a webhook to report.
-        statusWebhookLabel(status)?.let { webhook ->
-            Text(
-                webhook,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
-
-/**
- * Everything the current folder can *do*, gathered in one place.
- *
- * Refresh re-reads the browser and nothing else. Quick Review and Open List need an owning list.
- * Create List is offered for every folder under one name: what it does about an existing list —
- * this folder's own, an ancestor's, or ones below it — is decided by the overlap rules, and the
- * user confirms before anything is replaced.
- */
-@Composable
-private fun CurrentFolderActions(
+private fun CurrentFolderCard(
+    entries: List<FolderEntry>,
     status: FolderListStatus,
     quickReviewEnabled: Boolean,
     checkingSource: Boolean,
@@ -673,33 +723,89 @@ private fun CurrentFolderActions(
     onQuickReview: (Long) -> Unit
 ) {
     val owner = owningScope(status)
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Button(onClick = onRefresh) { Text("Refresh") }
 
-        if (owner != null && quickReviewAvailable(status, quickReviewEnabled)) {
-            if (checkingSource) {
+    SectionCard {
+        InfoActionsRow(
+            info = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+                ) {
+                    FolderTypeLabel(folderTypeOf(status))
+                    folderProgressLabel(status)?.let { progress ->
+                        StatusLine(
+                            progress,
+                            tone = progressTone(status),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                // Which list is involved, so a Sublist says whose subtree it is part of.
+                folderOwnerTitle(status)?.let { StatusLine(it) }
+                // Only a folder that owns its list outright has a webhook to report.
+                statusWebhookLabel(status)?.let { StatusLine(it) }
                 Text(
-                    "Checking source…",
+                    folderCountsLabel(entries),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-            } else {
-                TextButton(onClick = { onQuickReview(owner.id) }) { Text("Quick Review") }
+            },
+            actions = {
+                FolderAction("Refresh", Icons.Filled.Refresh, onClick = onRefresh)
+                // Subject to the Folder integration setting and to the freshness gate, which is
+                // what "Checking source" is: the action stays in place and simply cannot be
+                // pressed again until the check has answered.
+                if (owner != null && quickReviewAvailable(status, quickReviewEnabled)) {
+                    FolderAction(
+                        label = if (checkingSource) "Checking…" else "Quick Review",
+                        icon = Icons.Filled.Visibility,
+                        enabled = !checkingSource,
+                        onClick = { onQuickReview(owner.id) }
+                    )
+                }
+                owner?.let { scope ->
+                    FolderAction(
+                        "Open List",
+                        Icons.AutoMirrored.Filled.List,
+                        onClick = { onOpenList(scope.id) }
+                    )
+                }
+                // Always offered for a readable folder. What it does about an existing list —
+                // this folder's own, an ancestor's, or ones below it — is decided by the overlap
+                // rules, and the user confirms before anything is replaced.
+                FolderAction("Create List", Icons.Filled.Add, onClick = onCreateList)
             }
-        }
-        owner?.let { scope ->
-            TextButton(onClick = { onOpenList(scope.id) }) { Text("Open List") }
-        }
-        TextButton(onClick = onCreateList) { Text("Create List") }
+        )
     }
 }
 
 /**
- * A directory row: what it is, and a tap that goes into it. No list action of its own — those
+ * One folder action, sized to its label so the column's icons line up down the left.
+ *
+ * Borderless on purpose: four bordered buttons stacked in a narrow column read as a wall, and the
+ * card is information first.
+ */
+@Composable
+private fun FolderAction(
+    label: String,
+    icon: ImageVector,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    TextButton(onClick = onClick, enabled = enabled) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(ListeaDimens.IconSize))
+        Spacer(Modifier.width(ListeaDimens.RowGap))
+        Text(label, maxLines = 1)
+    }
+}
+
+/**
+ * A directory card: what it is, and a tap that goes into it. No list action of its own — those
  * belong to the folder you are actually standing in.
+ *
+ * Says exactly as much as the current-folder card says about the same folder, from the same
+ * [FolderType] and the same helpers, so a folder can never read as one thing here and another
+ * once you are inside it.
  */
 @Composable
 private fun FolderCard(
@@ -709,50 +815,59 @@ private fun FolderCard(
 ) {
     OutlinedCard(
         onClick = onNavigate,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(ListeaDimens.CardCorner)
     ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    horizontal = ListeaDimens.CardPadding,
+                    vertical = ListeaDimens.RowGap
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+        ) {
+            Icon(
+                Icons.Filled.Folder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+            ) {
                 Text(
                     entry.name,
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    "›",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                // A directory's size and modified time say nothing dependable about its
+                // contents, so neither is shown or reasoned about.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+                ) {
+                    FolderTypeLabel(folderTypeOf(status))
+                    folderProgressLabel(status)?.let { progress ->
+                        StatusLine(
+                            progress,
+                            tone = progressTone(status),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                // Null for a Sublist by construction: the webhook belongs to the ancestor list,
+                // and repeating it on every folder underneath would suggest each can deliver
+                // something of its own.
+                statusWebhookLabel(status)?.let { StatusLine(it) }
             }
-            // A directory's size and modified time say nothing dependable about its contents, so
-            // neither is shown or reasoned about.
-            Text(
-                folderTypeOf(status).label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = statusColor(status)
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            folderProgressLabel(status)?.let { progress ->
-                Text(
-                    progress,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = statusDetailColor(status),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            statusWebhookLabel(status)?.let { webhook ->
-                Text(
-                    webhook,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
         }
     }
 }
@@ -760,37 +875,44 @@ private fun FolderCard(
 /**
  * A file row. Tapping it only ever opens the file for viewing: no checking, no actions, no
  * workflow. The checked state is shown when the owning list tracks the file, but it is reporting,
- * not a control. [isChecked] is null when no list covers this folder, or when the file is not part
- * of the owning list's snapshot.
+ * not a control. [isChecked] is null when no list covers this folder, when the file is not part
+ * of the owning list's snapshot, or when Folder review integration is switched off.
  */
 @Composable
 private fun FileRow(entry: FolderEntry, isChecked: Boolean?, onOpen: () -> Unit) {
-    Column(
-        Modifier
+    Row(
+        modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onOpen)
-            .padding(vertical = 10.dp)
+            .padding(vertical = ListeaDimens.RowGap),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
     ) {
-        Text(
-            entry.name,
-            style = MaterialTheme.typography.bodyLarge,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Text(
-            fileDetail(entry),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        if (isChecked != null) {
+        Column(Modifier.weight(1f)) {
             Text(
-                if (isChecked) "Checked ✓" else "Not checked",
+                entry.name,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                fileDetail(entry),
                 style = MaterialTheme.typography.bodySmall,
-                color = if (isChecked) {
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        isChecked?.let { checked ->
+            Icon(
+                if (checked) Icons.Filled.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                contentDescription = if (checked) "Checked" else "Not checked",
+                tint = if (checked) {
                     MaterialTheme.colorScheme.primary
                 } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                }
+                    MaterialTheme.colorScheme.outline
+                },
+                modifier = Modifier.size(ListeaDimens.IconSize)
             )
         }
     }
@@ -827,19 +949,16 @@ private fun fileDetail(entry: FolderEntry): String = buildList {
 private fun fileTypeLabel(name: String): String? =
     name.substringAfterLast('.', "").takeIf { it.isNotEmpty() && it.length <= 5 }?.uppercase()
 
-@Composable
-private fun statusColor(status: FolderListStatus) = when {
-    status is FolderListStatus.Direct && status.scope.isComplete -> MaterialTheme.colorScheme.primary
-    status is FolderListStatus.None -> MaterialTheme.colorScheme.onSurfaceVariant
-    else -> MaterialTheme.colorScheme.onSurface
+/**
+ * Whether a folder's progress reads as finished.
+ *
+ * A finished subtree gets the same tint a finished direct list gets, and 0 / 0 is never
+ * "complete" — that rule lives on [FolderListStatus.Inherited] and is simply read here.
+ */
+private fun progressTone(status: FolderListStatus): StatusTone = when (status) {
+    is FolderListStatus.None -> StatusTone.Neutral
+    is FolderListStatus.Direct ->
+        if (status.scope.isComplete) StatusTone.Positive else StatusTone.Neutral
+    is FolderListStatus.Inherited ->
+        if (status.subtreeIsComplete) StatusTone.Positive else StatusTone.Neutral
 }
-
-/** A finished subtree gets the same tint a finished direct list gets. */
-@Composable
-private fun statusDetailColor(status: FolderListStatus) =
-    if (status is FolderListStatus.Inherited && status.subtreeIsComplete) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    }
-

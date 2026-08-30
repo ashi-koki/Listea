@@ -2,25 +2,39 @@ package me.ashikoki.listea
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -51,6 +65,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import me.ashikoki.listea.data.FolderDiff
+import me.ashikoki.listea.data.ItemAction
 import me.ashikoki.listea.data.ListDetail
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
@@ -94,10 +109,15 @@ fun ListDetailScreen(
 
     val current = detail
     if (current == null) {
-        Column(modifier.fillMaxSize()) {
-            TextButton(onClick = onBack) { Text("‹ Lists") }
-            Spacer(Modifier.height(16.dp))
-            CircularProgressIndicator()
+        ListeaNestedScaffold(
+            modifier = modifier,
+            title = "",
+            backLabel = "Lists",
+            onBack = onBack
+        ) { bodyModifier ->
+            Box(bodyModifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
         }
         return
     }
@@ -107,62 +127,85 @@ fun ListDetailScreen(
         newItem = ""
     }
 
-    Column(modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("‹ Lists") }
+    ListeaNestedScaffold(
+        modifier = modifier,
+        title = current.list.title,
+        backLabel = "Lists",
+        onBack = onBack,
+        trailing = {
             Text(
-                current.list.title,
-                style = MaterialTheme.typography.titleLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                progressLabel(current.completedCount, current.items.size, current.isComplete),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (current.isComplete) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
             )
         }
-        Spacer(Modifier.height(8.dp))
-
-        // 1. Source — only folder-backed lists have one to reconcile against.
-        val rootUri = current.list.sourceRootUri
-        val relativePath = current.list.sourceRelativePath
-        if (rootUri != null && relativePath != null) {
-            SourceSection(
-                rootUri = rootUri,
-                relativePath = relativePath,
-                missingCount = current.items.count { it.sourceMissing },
-                // Only this list's own verdict: a result for any other list is ignored outright.
-                freshness = freshness?.takeIf { it.listId == listId }?.state,
-                onResync = { viewModel.requestResync(listId) },
-                onClearMissing = { viewModel.requestMissingCleanup(listId) }
+    ) { bodyModifier ->
+        // One scroll surface for the whole page. Expanding the webhook panel pushes the items
+        // down instead of squeezing them into a fixed viewport, and the add-item row sits at the
+        // end of what it adds to rather than permanently reserving the bottom of the screen.
+        LazyColumn(
+            modifier = bodyModifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                horizontal = ListeaDimens.PagePadding,
+                vertical = ListeaDimens.RowGap
             )
-            Spacer(Modifier.height(12.dp))
-        }
-
-        // 2. Progress — the count, the way into Review, and the webhook that completion drives.
-        ProgressSection(
-            detail = current,
-            onReview = onReview,
-            webhook = {
-                WebhookSection(
-                    list = current.list,
-                    onEnabledChange = { viewModel.setWebhookEnabled(listId, it) },
-                    onUrlChange = { viewModel.setWebhookUrl(listId, it) },
-                    onTest = { viewModel.testWebhook(listId) }
-                )
+        ) {
+            // 1. Source — only folder-backed lists have one to reconcile against.
+            val rootUri = current.list.sourceRootUri
+            val relativePath = current.list.sourceRelativePath
+            if (rootUri != null && relativePath != null) {
+                item {
+                    SourceCard(
+                        rootUri = rootUri,
+                        relativePath = relativePath,
+                        missingCount = current.items.count { it.sourceMissing },
+                        // Only this list's own verdict: another list's result is ignored outright.
+                        freshness = freshness?.takeIf { it.listId == listId }?.state,
+                        onResync = { viewModel.requestResync(listId) },
+                        onClearMissing = { viewModel.requestMissingCleanup(listId) }
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                }
             }
-        )
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
 
-        // 3. Items — ListItems only. A folder-backed list holds its source files, however deep
-        // they sit; the folders they came from are not items and never appear here.
-        if (current.items.isEmpty()) {
-            Spacer(Modifier.height(16.dp))
-            Text("No items yet", style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.weight(1f))
-        } else {
-            LazyColumn(Modifier.weight(1f)) {
+            // 2. Progress — the count, the way into Review, and the webhook completion drives.
+            item {
+                ProgressCard(
+                    detail = current,
+                    onReview = onReview,
+                    webhook = {
+                        WebhookSection(
+                            list = current.list,
+                            onEnabledChange = { viewModel.setWebhookEnabled(listId, it) },
+                            onUrlChange = { viewModel.setWebhookUrl(listId, it) },
+                            onTest = { viewModel.testWebhook(listId) }
+                        )
+                    }
+                )
+                Spacer(Modifier.height(ListeaDimens.SectionGap))
+            }
+
+            // 3. Items — ListItems only. A folder-backed list holds its source files, however
+            // deep they sit; the folders they came from are not items and never appear here.
+            item {
+                SectionHeader("Items")
+                Spacer(Modifier.height(ListeaDimens.CompactGap))
+                HorizontalDivider()
+            }
+            if (current.items.isEmpty()) {
+                item {
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text("No items yet", style = MaterialTheme.typography.bodyMedium)
+                }
+            } else {
                 items(current.items, key = { it.id }) { item ->
                     ItemRow(
                         item = item,
-                        actionLabel = itemActionLabel(item, settings),
+                        settings = settings,
                         onToggle = { viewModel.setItemCompleted(item, it) },
                         onEdit = { editing = item },
                         onDelete = { viewModel.deleteItem(item) }
@@ -170,27 +213,30 @@ fun ListDetailScreen(
                     HorizontalDivider()
                 }
             }
-        }
 
-        // 4. Add item, at the end of what it adds to.
-        HorizontalDivider()
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = newItem,
-                onValueChange = { newItem = it },
-                label = { Text("New item") },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { submitNewItem() })
-            )
-            Button(onClick = { submitNewItem() }, enabled = newItem.isNotBlank()) { Text("Add") }
+            // 4. Add item, at the end of what it adds to — scrolled to, never pinned over it.
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = ListeaDimens.SectionGap),
+                    horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = newItem,
+                        onValueChange = { newItem = it },
+                        label = { Text("New item") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { submitNewItem() })
+                    )
+                    Button(onClick = { submitNewItem() }, enabled = newItem.isNotBlank()) {
+                        Text("Add")
+                    }
+                }
+            }
         }
     }
 
@@ -221,7 +267,7 @@ private fun ResyncDialogs(viewModel: ListsViewModel) {
             text = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator()
-                    Spacer(Modifier.width(16.dp))
+                    Spacer(Modifier.width(ListeaDimens.SectionGap))
                     Text("Comparing this list with its source folder.")
                 }
             },
@@ -249,7 +295,7 @@ private fun ResyncDialogs(viewModel: ListsViewModel) {
                         Text(countLine(diff.restoredPaths.size, "restored file"))
                     }
                     Text("${diff.unchangedCount} unchanged")
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
                     diff.addedPaths.take(PREVIEW_PATHS).forEach { Text("+ $it") }
                     diff.missingPaths.take(PREVIEW_PATHS).forEach { Text("- $it") }
                     Text(
@@ -280,7 +326,7 @@ private fun ResyncDialogs(viewModel: ListsViewModel) {
                                 " no longer exist in the source folder."
                             }
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
                     Text(
                         "Keeping them preserves their checked state. Removing them cannot be undone.",
                         style = MaterialTheme.typography.bodySmall,
@@ -318,15 +364,22 @@ private fun countLine(count: Int, noun: String): String =
  * How far along the list is, and the two things that act on that: Review, and the webhook that a
  * completion delivers. The count speaks for itself — no "in progress" restating what "12 / 20"
  * already says.
+ *
+ * The webhook sits at the bottom of this card and expands in place. Because the whole page is one
+ * scroll surface, opening it pushes the items down the page rather than squeezing them into
+ * whatever height is left over.
  */
 @Composable
-private fun ProgressSection(
+private fun ProgressCard(
     detail: ListDetail,
     onReview: () -> Unit,
     webhook: @Composable () -> Unit
 ) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    SectionCard(title = "Progress") {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+        ) {
             Text(
                 progressLabel(detail.completedCount, detail.items.size, detail.isComplete),
                 style = MaterialTheme.typography.titleMedium,
@@ -338,10 +391,18 @@ private fun ProgressSection(
                 modifier = Modifier.weight(1f)
             )
             if (detail.items.isNotEmpty()) {
-                Button(onClick = onReview) { Text("Review") }
+                Button(onClick = onReview) { Text("Review", maxLines = 1) }
             }
         }
-        Spacer(Modifier.height(8.dp))
+        // An empty list has nothing to be a fraction of, so it gets no bar rather than an
+        // ambiguous empty one.
+        if (detail.items.isNotEmpty()) {
+            LinearProgressIndicator(
+                progress = { detail.completedCount.toFloat() / detail.items.size },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        HorizontalDivider(Modifier.padding(top = ListeaDimens.CompactGap))
         webhook()
     }
 }
@@ -353,10 +414,11 @@ private fun ProgressSection(
  * are already flagged, so this button is the way back to it.
  *
  * Freshness is reported here and nowhere else: detecting changes never opens a dialog by itself.
- * The user is told, and decides when to act.
+ * The user is told, and decides when to act. An up-to-date source is three short lines, because
+ * the ordinary case is the one that should cost the least room.
  */
 @Composable
-private fun SourceSection(
+private fun SourceCard(
     rootUri: String,
     relativePath: String,
     missingCount: Int,
@@ -371,36 +433,51 @@ private fun SourceSection(
         }
     }
 
-    Column(Modifier.fillMaxWidth()) {
-        Text("Source", style = MaterialTheme.typography.labelMedium)
-        Text(
-            label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-        freshness?.let { FreshnessLine(it) }
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Unacknowledged changes promote the action to a filled button: hard to miss, but
-            // still just a button. "Update", not "check": checking already happened on entry.
-            if (freshness is SourceFreshness.ChangesAvailable) {
-                Button(onClick = onResync) { Text("Update from folder") }
-            } else {
-                TextButton(onClick = onResync) { Text("Update from folder") }
-            }
-            if (missingCount > 0) {
-                TextButton(onClick = onClearMissing) {
-                    Text(
-                        "Clear $missingCount missing",
-                        color = MaterialTheme.colorScheme.error
-                    )
+    SectionCard(title = "Source") {
+        InfoActionsRow(
+            // Wider than the folder card's column: "Update from folder" is the widest label in
+            // the app, and shortening it would make it say something else.
+            sideBySideMinWidth = 340.dp,
+            actionColumnWidth = 200.dp,
+            info = {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            actions = {
+                // Unacknowledged changes promote the action to a filled button: hard to miss,
+                // but still just a button. "Update", not "check": checking already happened on
+                // entry.
+                if (freshness is SourceFreshness.ChangesAvailable) {
+                    Button(onClick = onResync, modifier = Modifier.fillMaxWidth()) {
+                        Text("Update from folder", maxLines = 1)
+                    }
+                } else {
+                    OutlinedButton(onClick = onResync, modifier = Modifier.fillMaxWidth()) {
+                        Text("Update from folder", maxLines = 1)
+                    }
+                }
+                // A standing offer, not a warning: it is a button like its neighbour, tinted
+                // because removing items is the one thing on this card that cannot be undone.
+                if (missingCount > 0) {
+                    OutlinedButton(
+                        onClick = onClearMissing,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text("Clear $missingCount missing", maxLines = 1)
+                    }
                 }
             }
-        }
+        )
+        // Full width below both columns: the change summary names everything that actually
+        // changed, and is the one line here that must not be squeezed into half a card.
+        freshness?.let { FreshnessLine(it) }
     }
 }
 
@@ -409,16 +486,26 @@ private fun SourceSection(
 private fun FreshnessLine(state: SourceFreshness) {
     val text = when (state) {
         SourceFreshness.Checking -> "Checking source…"
-        SourceFreshness.UpToDate -> "✓ Up to date"
-        SourceFreshness.SourceUnavailable -> "! Source unavailable"
-        is SourceFreshness.ChangesAvailable -> "! Changes detected · " + changesSummary(state.diff)
+        SourceFreshness.NotChecked -> "Not checked — automatic checking is off"
+        SourceFreshness.UpToDate -> "Up to date"
+        SourceFreshness.SourceUnavailable -> "Source unavailable"
+        is SourceFreshness.ChangesAvailable -> "Changes detected · " + changesSummary(state.diff)
     }
-    val color = when (state) {
-        SourceFreshness.Checking -> MaterialTheme.colorScheme.onSurfaceVariant
-        SourceFreshness.UpToDate -> MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.error
+    val tone = when (state) {
+        SourceFreshness.Checking, SourceFreshness.NotChecked -> StatusTone.Neutral
+        SourceFreshness.UpToDate -> StatusTone.Positive
+        else -> StatusTone.Warning
     }
-    Text(text, style = MaterialTheme.typography.bodySmall, color = color)
+    val icon = when (state) {
+        SourceFreshness.Checking -> null
+        SourceFreshness.NotChecked -> Icons.AutoMirrored.Filled.HelpOutline
+        SourceFreshness.UpToDate -> Icons.Filled.CheckCircle
+        SourceFreshness.SourceUnavailable -> Icons.Filled.ErrorOutline
+        is SourceFreshness.ChangesAvailable -> Icons.Filled.Warning
+    }
+    // Two lines, because the change summary names everything that actually changed and must not
+    // be cut off at the point where it stops being actionable.
+    StatusLine(text, tone = tone, icon = icon, maxLines = 2)
 }
 
 /**
@@ -451,26 +538,30 @@ private fun WebhookSection(
     var urlText by remember(list.id) { mutableStateOf(list.webhookUrl) }
     val urlProblem = webhookUrlError(urlText)
 
+    // The shared browse-row wording, minus the prefix the header already provides: one
+    // description of webhook state, formatted once, wherever it is shown.
+    val status = webhookStatusLabel(
+        enabled = list.webhookEnabled,
+        lastDeliveryStatus = list.lastDeliveryStatus,
+        lastDeliveryCode = list.lastDeliveryCode
+    ).removePrefix("Webhook · ")
+
     Column(Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { expanded = !expanded }
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(vertical = ListeaDimens.RowGap),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
         ) {
-            Text(
-                "Webhook",
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.weight(1f)
+            Text("Webhook", style = MaterialTheme.typography.titleSmall)
+            StatusLine(status, modifier = Modifier.weight(1f))
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text(
-                if (list.webhookEnabled) "On" else "Off",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(if (expanded) "▴" else "▾", style = MaterialTheme.typography.bodyMedium)
         }
 
         if (expanded) {
@@ -498,28 +589,26 @@ private fun WebhookSection(
                 ),
                 modifier = Modifier.fillMaxWidth()
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            ActionGroup {
                 OutlinedButton(onClick = onTest, enabled = urlProblem == null) {
-                    Text("Test webhook")
+                    Text("Test webhook", maxLines = 1)
                 }
-                Text(
-                    deliveryLabel(list),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                StatusLine(deliveryLabel(list))
             }
         }
     }
 }
 
+/**
+ * One item: check it, read what it is, or remove it. Editing is a tap on the text.
+ *
+ * The tags are read-only here — actions are set in Review — and carry whatever names Settings
+ * currently gives them, which is why [settings] is passed in rather than the labels.
+ */
 @Composable
 private fun ItemRow(
     item: ListItemEntity,
-    actionLabel: String?,
+    settings: AppSettings,
     onToggle: (Boolean) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
@@ -530,51 +619,80 @@ private fun ItemRow(
     ) {
         Checkbox(checked = item.isCompleted, onCheckedChange = onToggle)
         Column(
-            Modifier
+            modifier = Modifier
                 .weight(1f)
                 .clickable(onClick = onEdit)
-                .padding(vertical = 12.dp)
+                .padding(vertical = ListeaDimens.RowGap),
+            verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
         ) {
             Text(
                 text = item.title,
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyMedium,
                 textDecoration = if (item.isCompleted) TextDecoration.LineThrough else null,
                 color = if (item.isCompleted) {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 } else {
                     MaterialTheme.colorScheme.onSurface
-                }
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            // Folder-backed items keep their path so bilibili/a.jpg stays distinct from danbooru/a.jpg.
+            // Folder-backed items keep their path so bilibili/a.jpg stays distinct from
+            // danbooru/a.jpg.
             item.sourceRelativePath?.takeIf { it != item.title }?.let { path ->
-                Text(
-                    path,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                StatusLine(path)
             }
-            // Read-only here: actions are set in Review, this row just reports them, under
-            // whatever names Settings currently gives them.
-            actionLabel?.let { actions ->
-                Text(
-                    actions,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
+            ItemActionTags(item, settings)
             // Subtle: the item stays checkable and is never hidden or removed.
             if (item.sourceMissing) {
-                Text(
+                StatusLine(
                     "Source missing",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
+                    tone = StatusTone.Warning,
+                    icon = Icons.Filled.ErrorOutline
                 )
             }
         }
         IconButton(onClick = onDelete) {
-            Text("✕", style = MaterialTheme.typography.titleMedium)
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = "Delete item",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(ListeaDimens.IconSize)
+            )
+        }
+    }
+}
+
+/**
+ * The item's tags: Favourite, and the two custom slots, one badge each.
+ *
+ * One badge per action rather than a single joined string, because these are three independent
+ * flags and the row is read at a glance — "★  Save" as one line invites reading it as one label.
+ * Favourite is tinted, the custom slots are not: the star is the only one of the three whose
+ * meaning is fixed, and the other two say whatever Settings has named them.
+ *
+ * Emits nothing at all for an item with no actions set, so an untagged list stays quiet.
+ */
+@Composable
+private fun ItemActionTags(item: ListItemEntity, settings: AppSettings) {
+    val tags = ItemAction.entries.filter { it.isSetOn(item) }
+    if (tags.isEmpty()) return
+
+    Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {
+        tags.forEach { action ->
+            ListeaBadge(
+                text = settings.labelOf(action),
+                container = if (action == ItemAction.FAVORITE) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                contentColor = if (action == ItemAction.FAVORITE) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
         }
     }
 }

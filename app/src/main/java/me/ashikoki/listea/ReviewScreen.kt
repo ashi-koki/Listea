@@ -12,24 +12,26 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.exoplayer.ExoPlayer
@@ -38,38 +40,37 @@ import me.ashikoki.listea.data.ItemAction
 import me.ashikoki.listea.data.ListItemEntity
 
 /**
- * The text and exits that distinguish one review context from another. Everything else — the
- * queue mechanics, gestures, actions and media renderer — is shared.
+ * The few strings that distinguish one review context from another. Everything else — the queue
+ * mechanics, the gestures, the action bar, the media renderer and the Info sheet — is shared.
  *
- * [context] names where the queue came from and belongs in the secondary line, never in the
- * header: the header belongs to the item on screen, and it reads the same whether the user
- * arrived from a list or from a folder. Back already knows the way home.
+ * Nothing in here reaches the media surface itself. The top bar says what the item is and where
+ * you are in the queue, and it reads the same whether you arrived from a list or from a folder;
+ * [context] and [listTitle] are for the completion screen and the Info sheet, which is where
+ * saying which queue this is belongs.
  */
 data class ReviewChrome(
+    /** What finished, on the completion screen: a list's title, or the folder being reviewed. */
     val context: String,
-    val subtitle: String,
-    val backLabel: String,
+    /** The list every edit here actually lands on, named for the Info sheet. */
+    val listTitle: String,
     val completeHeadline: String,
     val exitLabel: String
 )
 
 /**
- * Everything known about the item on screen, gathered in one place for a future Info surface.
+ * Everything the Info sheet says about the item on screen that Listea already knows.
  *
- * V3.9 builds the model, not the sheet. Size and modified time are nullable because nothing is
- * stored for them yet and no per-item file access is done to find out; the rest is already at
- * hand and is simply no longer thrown away.
+ * All of it is on the [ListItemEntity] the queue is already holding, so building this costs
+ * nothing and can happen per card. What is *not* here — type, size, modified time — is not stored
+ * anywhere and is read from the provider by [MediaFacts], once, when the sheet opens.
  */
 data class ReviewItemInfo(
     val title: String,
     val relativePath: String?,
     val sourceUri: String?,
-    val sizeBytes: Long?,
-    val lastModified: Long?,
     val sourceMissing: Boolean,
     val isCompleted: Boolean,
     val actionLabel: String?,
-    val listId: Long,
     val listTitle: String?
 )
 
@@ -82,12 +83,9 @@ fun reviewItemInfo(
     title = item.title,
     relativePath = item.sourceRelativePath,
     sourceUri = item.sourceUri,
-    sizeBytes = null,
-    lastModified = null,
     sourceMissing = item.sourceMissing,
     isCompleted = item.isCompleted,
     actionLabel = itemActionLabel(item, settings),
-    listId = item.listId,
     listTitle = listTitle
 )
 
@@ -109,20 +107,19 @@ fun ReviewScreen(
 ) {
     val detailFlow = remember(listId) { viewModel.observeDetail(listId) }
     val detail by detailFlow.collectAsStateWithLifecycle(initialValue = null)
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     BackHandler { onBack() }
 
     val current = detail
     if (current == null) {
-        ReviewFrame(modifier, title = "", backLabel = "‹ List", onBack = onBack) {
-            CircularProgressIndicator()
-        }
+        ReviewFrame(modifier, title = "", onBack = onBack) { CircularProgressIndicator() }
         return
     }
 
     val items = current.items
     if (items.isEmpty()) {
-        ReviewFrame(modifier, current.list.title, backLabel = "‹ List", onBack = onBack) {
+        ReviewFrame(modifier, current.list.title, onBack = onBack) {
             Text("This list has no items to review.")
         }
         return
@@ -135,13 +132,15 @@ fun ReviewScreen(
         sessionKey = listId,
         chrome = ReviewChrome(
             context = current.list.title,
-            subtitle = current.list.title + " · " +
-                progressLabel(current.completedCount, items.size, current.isComplete),
-            backLabel = "‹ List",
+            listTitle = current.list.title,
             completeHeadline = "Review complete",
             exitLabel = "Back to list"
         ),
-        persistedItemId = current.list.reviewCurrentItemId,
+        // The setting decides what is read on entry, not what is written: the position keeps
+        // being recorded below either way, so switching resuming back on picks up where Review
+        // actually got to rather than wherever it was when it was switched off.
+        persistedItemId = current.list.reviewCurrentItemId
+            .takeIf { settings.rememberReviewPosition },
         onPositionChanged = { viewModel.setReviewPosition(listId, it) },
         onRestart = { viewModel.setReviewPosition(listId, items.first().id) },
         onBack = onBack
@@ -175,6 +174,11 @@ fun ReviewSession(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     var currentItemId by rememberSaveable(sessionKey) { mutableStateOf<Long?>(null) }
     var finished by rememberSaveable(sessionKey) { mutableStateOf(false) }
+    // Not saved: reopening Info after a rotation would be answering a question nobody asked.
+    var infoOpen by remember { mutableStateOf(false) }
+    // Driven only by the player's own fullscreen button, and dropped whenever the card changes:
+    // swiping onto a still image with the chrome hidden would leave nothing to swipe back with.
+    var fullscreen by remember { mutableStateOf(false) }
 
     // One player for the whole screen rather than one per card, so nothing leaks between items.
     val context = LocalContext.current
@@ -192,7 +196,7 @@ fun ReviewSession(
 
     val index = items.indexOfFirst { it.id == currentItemId }
     if (index < 0) {
-        ReviewFrame(modifier, chrome.context, chrome.backLabel, onBack) { CircularProgressIndicator() }
+        ReviewFrame(modifier, chrome.context, onBack) { CircularProgressIndicator() }
         return
     }
 
@@ -217,6 +221,9 @@ fun ReviewSession(
     }
 
     val item = items[index]
+    LaunchedEffect(item.id) { fullscreen = false }
+    FullscreenSystemBars(fullscreen)
+    BackHandler(enabled = fullscreen) { fullscreen = false }
 
     fun goTo(newIndex: Int) {
         val id = items[newIndex].id
@@ -224,72 +231,43 @@ fun ReviewSession(
         onPositionChanged(id)
     }
 
-    Column(modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text(chrome.backLabel) }
-            // The filename, held to one line: names get long, and the media is what the screen is
-            // for. The full value stays available through reviewItemInfo for a future Info action.
-            Text(
-                item.title,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                "${index + 1} / ${items.size}",
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
-        Text(
-            chrome.subtitle,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Spacer(Modifier.height(8.dp))
-        HorizontalDivider()
-
-        SwipeCard(
-            key = item.id,
-            // Forward is never blocked: swiping the last item off checks it and ends the review.
-            canSwipeForward = true,
-            canSwipeBack = index > 0,
-            onSwipeForward = {
-                // The existing completion path, so a list that becomes complete here fires the
-                // webhook exactly as a manual checkbox tick would — from either review mode.
-                viewModel.setItemCompleted(item, true)
-                if (index == items.lastIndex) finished = true else goTo(index + 1)
-            },
-            onSwipeBack = { goTo(index - 1) },
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-        ) {
-            ItemPreview(
-                item = item,
-                player = player,
-                imageLoader = imageLoader,
-                settings = settings,
+    MediaShell(
+        modifier = modifier,
+        title = item.title,
+        // Where you are in this queue, which for Quick Review is the folder's items and not the
+        // owning list's total. Completion progress is a list's business and lives on its page.
+        position = "${index + 1} / ${items.size}",
+        onBack = onBack,
+        chromeVisible = !fullscreen,
+        media = {
+            SwipeCard(
+                key = item.id,
+                // Forward is never blocked: swiping the last item off checks it and ends the
+                // review.
+                canSwipeForward = true,
+                canSwipeBack = index > 0,
+                onSwipeForward = {
+                    // The existing completion path, so a list that becomes complete here fires
+                    // the webhook exactly as a manual checkbox tick would — from either mode.
+                    viewModel.setItemCompleted(item, true)
+                    if (index == items.lastIndex) finished = true else goTo(index + 1)
+                },
+                onSwipeBack = { goTo(index - 1) },
                 modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        HorizontalDivider()
-        Column(Modifier.padding(top = 8.dp)) {
-            // The filename is in the header now; what is left here is the metadata V4 will fold
-            // behind an Info action.
-            item.sourceRelativePath?.takeIf { it != item.title }?.let { path ->
-                Text(
-                    path,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+            ) {
+                ItemPreview(
+                    item = item,
+                    player = player,
+                    imageLoader = imageLoader,
+                    settings = settings,
+                    isFullscreen = fullscreen,
+                    onFullscreenChange = { fullscreen = it },
+                    modifier = Modifier.fillMaxSize()
                 )
             }
-            ReviewActionRow(
+        },
+        controls = {
+            ReviewActionBar(
                 item = item,
                 // Observed here rather than threaded through every caller: renaming an action in
                 // Settings relabels the chips immediately, with no restart and no item touched.
@@ -297,57 +275,50 @@ fun ReviewSession(
                 onToggleCompleted = { viewModel.setItemCompleted(item, it) },
                 onToggleAction = { action, enabled ->
                     viewModel.setItemAction(item, action, enabled)
-                }
-            )
-            Text(
-                "Swipe left to check and continue · swipe right to go back",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                onInfo = { infoOpen = true }
             )
         }
+    )
+
+    if (infoOpen) {
+        ReviewInfoSheet(
+            info = reviewItemInfo(item, settings, chrome.listTitle),
+            onDismiss = { infoOpen = false }
+        )
     }
 }
 
 /**
- * Completion toggle plus the three review actions, for the current item only.
+ * Everything the media surface stopped saying about the item in front of the user.
  *
- * It lives below the card rather than on it, outside the Box that owns the horizontal drag
- * detector, so a tap here is never seen by the swipe gesture and can never navigate.
- *
- * The completion chip goes through the same [ListsViewModel.setItemCompleted] path as the
- * checkbox and the left swipe, so checking the last item here fires the completion webhook
- * exactly as it would anywhere else. The action chips only persist a flag: no navigation, no
- * completion change, no delivery.
+ * The list-side facts are already in memory on the [ListItemEntity], so [reviewItemInfo] costs
+ * nothing. Type, size and modified time are not stored anywhere and are read once, here, while
+ * the sheet is open — never per card and never while swiping.
  */
 @Composable
-private fun ReviewActionRow(
-    item: ListItemEntity,
-    settings: AppSettings,
-    onToggleCompleted: (Boolean) -> Unit,
-    onToggleAction: (ItemAction, Boolean) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        FilterChip(
-            selected = item.isCompleted,
-            onClick = { onToggleCompleted(!item.isCompleted) },
-            label = { Text(if (item.isCompleted) "Checked" else "Not checked") }
-        )
-        // Fixed order, so the row never reshuffles as actions are toggled.
-        ItemAction.entries.forEach { action ->
-            val isSet = action.isSetOn(item)
-            FilterChip(
-                selected = isSet,
-                onClick = { onToggleAction(action, !isSet) },
-                label = { Text(settings.labelOf(action)) }
-            )
-        }
+private fun ReviewInfoSheet(info: ReviewItemInfo, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val facts by produceState(MediaFacts(), info.sourceUri) {
+        value = info.sourceUri?.let { readMediaFacts(context, it) } ?: MediaFacts()
     }
+
+    ItemInfoSheet(
+        title = info.title,
+        onDismiss = onDismiss,
+        rows = buildList {
+            info.relativePath?.let { add(InfoField("Path in source folder", it)) }
+            info.listTitle?.let { add(InfoField("List", it)) }
+            add(InfoField("Status", if (info.isCompleted) "Checked" else "Not checked"))
+            add(InfoField("Actions", info.actionLabel ?: "None"))
+            when {
+                info.sourceUri == null -> add(InfoField("Source", "Manual item — no file"))
+                info.sourceMissing ->
+                    add(InfoField("Source", "Missing from the source folder"))
+            }
+            addAll(mediaFactRows(facts, info.title))
+        }
+    )
 }
 
 /**
@@ -360,20 +331,31 @@ private fun resumeItemId(persisted: Long?, items: List<ListItemEntity>): Long {
     return (items.firstOrNull { !it.isCompleted } ?: items.first()).id
 }
 
+/**
+ * Loading, and the queues that turn out to have nothing in them.
+ *
+ * Same thin bar as the media screens so entering a review never jumps between two layouts, minus
+ * the position, because there is no queue to be anywhere in yet.
+ */
 @Composable
 fun ReviewFrame(
     modifier: Modifier,
     title: String,
-    backLabel: String,
     onBack: () -> Unit,
     content: @Composable () -> Unit
 ) {
     Column(modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text(backLabel) }
-            Text(title, style = MaterialTheme.typography.titleMedium)
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Text(
+                title,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                modifier = Modifier.padding(end = ListeaDimens.PagePadding)
+            )
         }
-        Spacer(Modifier.height(16.dp))
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
     }
 }
@@ -395,15 +377,15 @@ private fun ReviewFinished(
         verticalArrangement = Arrangement.Center
     ) {
         Text(headline, style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(ListeaDimens.RowGap))
         Text(title, style = MaterialTheme.typography.bodyMedium)
         Text(
             "$completed / $total processed",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(Modifier.height(24.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Spacer(Modifier.height(ListeaDimens.SectionGap))
+        Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)) {
             Button(onClick = onBack) { Text(exitLabel) }
             onRestart?.let { restart ->
                 OutlinedButton(onClick = restart) { Text("Review again") }
@@ -425,6 +407,8 @@ private fun ItemPreview(
     player: ExoPlayer,
     imageLoader: ImageLoader,
     settings: AppSettings,
+    isFullscreen: Boolean,
+    onFullscreenChange: (Boolean) -> Unit,
     modifier: Modifier
 ) {
     val uri = item.sourceUri
@@ -444,6 +428,8 @@ private fun ItemPreview(
         imageLoader = imageLoader,
         modifier = modifier,
         videoAutoplay = settings.videoAutoplay,
-        videoStartMuted = settings.videoStartMuted
+        videoStartMuted = settings.videoStartMuted,
+        isFullscreen = isFullscreen,
+        onFullscreenChange = onFullscreenChange
     )
 }

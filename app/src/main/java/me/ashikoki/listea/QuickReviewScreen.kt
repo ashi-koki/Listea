@@ -49,9 +49,7 @@ fun QuickReviewScreen(
 
     val current = detail
     if (current == null) {
-        ReviewFrame(modifier, "Quick Review", backLabel = "‹ Folder", onBack = onExit) {
-            CircularProgressIndicator()
-        }
+        ReviewFrame(modifier, "Quick Review", onBack = onExit) { CircularProgressIndicator() }
         return
     }
 
@@ -67,27 +65,26 @@ fun QuickReviewScreen(
     if (queue.isEmpty()) {
         // Subfolders only, or direct files the list has not taken in yet. Nothing is pulled from
         // deeper folders to avoid this: an empty folder-scoped queue is simply empty.
-        ReviewFrame(modifier, "Quick Review", backLabel = "‹ Folder", onBack = onExit) {
+        ReviewFrame(modifier, "Quick Review", onBack = onExit) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     "No items to review in this folder",
                     style = MaterialTheme.typography.bodyLarge,
                     textAlign = TextAlign.Center
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(ListeaDimens.RowGap))
                 Text(
                     folderName,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(ListeaDimens.SectionGap))
                 Button(onClick = onExit) { Text("Exit") }
             }
         }
         return
     }
 
-    val completed = queue.count { it.isCompleted }
     ReviewSession(
         modifier = modifier,
         viewModel = viewModel,
@@ -97,10 +94,8 @@ fun QuickReviewScreen(
         sessionKey = "quick:${target.listId}:${target.folderPath}",
         chrome = ReviewChrome(
             context = "Quick Review · " + folderName,
-            // Scoped counts, never the owning list's overall total.
-            subtitle = "Quick Review · " + folderName + " · " +
-                progressLabel(completed, queue.size, completed == queue.size),
-            backLabel = "‹ Folder",
+            // Every edit here lands on the owning list's real items, and Info says so.
+            listTitle = current.list.title,
             completeHeadline = "Quick Review complete",
             exitLabel = "Exit"
         ),

@@ -8,19 +8,28 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -39,46 +48,42 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import me.ashikoki.listea.data.ListSummary
 
+/**
+ * The Lists destination and the two screens nested under it.
+ *
+ * Which nested screen is open is owned by the shell — it decides whether the bottom navigation
+ * belongs on screen — but the switching itself stays here, next to the screens it switches
+ * between.
+ */
 @Composable
 fun ListsScreen(
     modifier: Modifier = Modifier,
     viewModel: ListsViewModel = viewModel(),
-    requestedListId: Long? = null,
-    onRequestConsumed: () -> Unit = {}
+    openListId: Long? = null,
+    onOpenListChange: (Long?) -> Unit = {},
+    reviewListId: Long? = null,
+    onReviewListChange: (Long?) -> Unit = {}
 ) {
-    var openListId by rememberSaveable { mutableStateOf<Long?>(null) }
-    var reviewListId by rememberSaveable { mutableStateOf<Long?>(null) }
-
-    // The Folder tab can ask for a specific list to be opened.
-    LaunchedEffect(requestedListId) {
-        if (requestedListId != null) {
-            openListId = requestedListId
-            onRequestConsumed()
-        }
-    }
-
-    val reviewing = reviewListId
-    val listId = openListId
     when {
-        reviewing != null -> ReviewScreen(
+        reviewListId != null -> ReviewScreen(
             modifier = modifier,
             viewModel = viewModel,
-            listId = reviewing,
-            onBack = { reviewListId = null }
+            listId = reviewListId,
+            onBack = { onReviewListChange(null) }
         )
 
-        listId == null -> ListsIndex(
+        openListId == null -> ListsIndex(
             modifier = modifier,
             viewModel = viewModel,
-            onOpenList = { openListId = it }
+            onOpenList = { onOpenListChange(it) }
         )
 
         else -> ListDetailScreen(
             modifier = modifier,
             viewModel = viewModel,
-            listId = listId,
-            onBack = { openListId = null },
-            onReview = { reviewListId = listId }
+            listId = openListId,
+            onBack = { onOpenListChange(null) },
+            onReview = { onReviewListChange(openListId) }
         )
     }
 }
@@ -97,43 +102,53 @@ private fun ListsIndex(
 
     val visible = remember(summaries, filter) { summaries.filter(filter::accepts) }
 
-    Column(modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Lists", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            Button(onClick = { creating = true }) { Text("New list") }
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    // The screen title lives in the shell's app bar now; this group is the filters and the one
+    // action the index owns. It wraps rather than overflowing, so "New list" cannot be pushed
+    // off the right edge of a narrow portrait screen by three filter chips.
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = ListeaDimens.PagePadding)
+    ) {
+        ActionGroup(Modifier.padding(vertical = ListeaDimens.RowGap)) {
             ListFilter.entries.forEach { option ->
                 FilterChip(
                     selected = filter == option,
                     onClick = { filter = option },
-                    label = { Text(option.label) }
+                    label = { Text(option.label, maxLines = 1) }
                 )
             }
+            Button(onClick = { creating = true }) {
+                Icon(
+                    Icons.Filled.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(ListeaDimens.IconSize)
+                )
+                Spacer(Modifier.width(ListeaDimens.CompactGap))
+                Text("New list", maxLines = 1)
+            }
         }
-        Spacer(Modifier.height(8.dp))
         HorizontalDivider()
 
         if (visible.isEmpty()) {
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(ListeaDimens.SectionGap))
             Text(
                 if (summaries.isEmpty()) "No lists yet" else "No lists in this filter",
                 style = MaterialTheme.typography.bodyMedium
             )
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(vertical = ListeaDimens.RowGap),
+                verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+            ) {
                 items(visible, key = { it.id }) { summary ->
-                    ListRow(
+                    ListCard(
                         summary = summary,
                         onOpen = { onOpenList(summary.id) },
                         onRename = { renaming = summary },
                         onDelete = { deleting = summary }
                     )
-                    HorizontalDivider()
                 }
             }
         }
@@ -178,8 +193,19 @@ private fun ListsIndex(
     }
 }
 
+/**
+ * One list, as little as the index needs to say about it: what it is called, how far along it is,
+ * and a way to rename or delete it.
+ *
+ * Nothing here reports source freshness or offers Review — an index is for choosing which list to
+ * work on, and both of those belong to the list you have chosen. The whole card is the way in.
+ *
+ * Every list reports its webhook, including one that has none configured. "Off" is a real answer
+ * to "will finishing this send anything?", and leaving the line out entirely made the index look
+ * as though it had failed to load rather than as though the answer were no.
+ */
 @Composable
-private fun ListRow(
+private fun ListCard(
     summary: ListSummary,
     onOpen: () -> Unit,
     onRename: () -> Unit,
@@ -187,45 +213,57 @@ private fun ListRow(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onOpen)
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
+    OutlinedCard(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(ListeaDimens.CardCorner)
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(summary.title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                progressLabel(summary.completedItems, summary.totalItems, summary.isComplete),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                webhookStatusLabel(
-                    enabled = summary.webhookEnabled,
-                    lastDeliveryStatus = summary.lastDeliveryStatus,
-                    lastDeliveryCode = summary.lastDeliveryCode
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    start = ListeaDimens.CardPadding,
+                    top = ListeaDimens.RowGap,
+                    bottom = ListeaDimens.RowGap
                 ),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        Box {
-            IconButton(onClick = { menuOpen = true }) {
-                Text("⋮", style = MaterialTheme.typography.titleMedium)
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+            ) {
+                Text(
+                    summary.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                StatusLine(
+                    progressLabel(summary.completedItems, summary.totalItems, summary.isComplete),
+                    tone = if (summary.isComplete) StatusTone.Positive else StatusTone.Neutral
+                )
+                StatusLine(
+                    webhookStatusLabel(
+                        enabled = summary.webhookEnabled,
+                        lastDeliveryStatus = summary.lastDeliveryStatus,
+                        lastDeliveryCode = summary.lastDeliveryCode
+                    )
+                )
             }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("Rename") },
-                    onClick = { menuOpen = false; onRename() }
-                )
-                DropdownMenuItem(
-                    text = { Text("Delete") },
-                    onClick = { menuOpen = false; onDelete() }
-                )
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Rename") },
+                        onClick = { menuOpen = false; onRename() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete") },
+                        onClick = { menuOpen = false; onDelete() }
+                    )
+                }
             }
         }
     }

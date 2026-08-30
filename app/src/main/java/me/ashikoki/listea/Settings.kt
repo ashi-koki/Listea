@@ -42,8 +42,22 @@ data class AppSettings(
      * Whether full-list Review resumes where it left off. True is the long-standing behaviour and
      * stays the default; Quick Review is folder-scoped and temporary, so it always starts at the
      * first unchecked item regardless.
+     *
+     * This decides what is *read* on entry, never what is written: the position keeps being
+     * recorded either way, so switching back on resumes from where Review actually got to rather
+     * than from wherever it was when the setting was switched off.
      */
-    val rememberReviewPosition: Boolean = true
+    val rememberReviewPosition: Boolean = true,
+
+    /**
+     * Whether opening a folder-backed list scans its source folder to see if it has changed.
+     *
+     * On is the long-standing behaviour. Off suppresses only the *automatic* scan: "Update from
+     * folder" still works, and so does the Quick Review gate, because both are things the user
+     * asked for. With it off a list reports [SourceFreshness.NotChecked] rather than an
+     * up-to-date verdict nothing has established.
+     */
+    val autoCheckSourceFreshness: Boolean = true
 ) {
     /**
      * What the user sees this action called. Favourite is not configurable in V3.8, so it answers
@@ -116,7 +130,9 @@ class SettingsStore(context: Context) {
                 videoAutoplay = prefs[KEY_VIDEO_AUTOPLAY] ?: defaults.videoAutoplay,
                 videoStartMuted = prefs[KEY_VIDEO_MUTED] ?: defaults.videoStartMuted,
                 rememberReviewPosition = prefs[KEY_REMEMBER_POSITION]
-                    ?: defaults.rememberReviewPosition
+                    ?: defaults.rememberReviewPosition,
+                autoCheckSourceFreshness = prefs[KEY_AUTO_CHECK_FRESHNESS]
+                    ?: defaults.autoCheckSourceFreshness
             )
         }
 
@@ -142,6 +158,12 @@ class SettingsStore(context: Context) {
 
     suspend fun setVideoStartMuted(muted: Boolean) = put { it[KEY_VIDEO_MUTED] = muted }
 
+    suspend fun setRememberReviewPosition(remember: Boolean) =
+        put { it[KEY_REMEMBER_POSITION] = remember }
+
+    suspend fun setAutoCheckSourceFreshness(enabled: Boolean) =
+        put { it[KEY_AUTO_CHECK_FRESHNESS] = enabled }
+
     private suspend fun put(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         dataStore.edit(block)
     }
@@ -157,5 +179,6 @@ class SettingsStore(context: Context) {
         val KEY_VIDEO_AUTOPLAY = booleanPreferencesKey("video_autoplay")
         val KEY_VIDEO_MUTED = booleanPreferencesKey("video_start_muted")
         val KEY_REMEMBER_POSITION = booleanPreferencesKey("remember_review_position")
+        val KEY_AUTO_CHECK_FRESHNESS = booleanPreferencesKey("auto_check_source_freshness")
     }
 }

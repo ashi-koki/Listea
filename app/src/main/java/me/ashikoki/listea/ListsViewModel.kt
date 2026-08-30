@@ -75,6 +75,13 @@ sealed interface SourceFreshness {
     data object Checking : SourceFreshness
 
     /**
+     * Nothing authoritative is known, because the automatic check is switched off and nothing has
+     * asked for one. Deliberately its own state rather than an absent one: silence would be read
+     * as "fine", and the whole point of the setting is that Listea has not looked.
+     */
+    data object NotChecked : SourceFreshness
+
+    /**
      * No *unacknowledged* changes, which is not the same as the rows matching the filesystem
      * byte for byte. A source file that vanished, was reconciled, and was deliberately kept as a
      * missing item is already acknowledged: it must not make the list stale forever.
@@ -353,6 +360,13 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
      *
      * Manual lists have no source to compare against, so they are dropped before any scan starts.
      * A previous check is cancelled rather than left to race: whichever check started last wins.
+     *
+     * Skipped entirely when the user has switched the automatic check off. The setting is read
+     * from the store rather than from the observed [settings] flow, because this runs the instant
+     * a page opens and a flow that has not warmed up yet would answer with the default and scan
+     * something the user asked it not to. A verdict already held for *this* list survives the
+     * skip: it came from a scan that really happened, and discarding it would throw away an
+     * update the user had just asked for.
      */
     fun checkSourceFreshness(listId: Long) {
         freshnessJob?.cancel()
@@ -360,6 +374,13 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             val list = dao.getList(listId)
             if (list == null || list.sourceRootUri == null || list.sourceRelativePath == null) {
                 _sourceFreshness.value = null
+                return@launch
+            }
+
+            if (!settingsStore.read().autoCheckSourceFreshness) {
+                if (_sourceFreshness.value?.listId != listId) {
+                    _sourceFreshness.value = ListFreshness(listId, SourceFreshness.NotChecked)
+                }
                 return@launch
             }
 
@@ -555,6 +576,14 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     fun setVideoAutoplay(enabled: Boolean) = launchDb { settingsStore.setVideoAutoplay(enabled) }
 
     fun setVideoStartMuted(muted: Boolean) = launchDb { settingsStore.setVideoStartMuted(muted) }
+
+    fun setRememberReviewPosition(remember: Boolean) = launchDb {
+        settingsStore.setRememberReviewPosition(remember)
+    }
+
+    fun setAutoCheckSourceFreshness(enabled: Boolean) = launchDb {
+        settingsStore.setAutoCheckSourceFreshness(enabled)
+    }
 
     /** Remembers where Review is, by item id. Never touches completion state. */
     fun setReviewPosition(listId: Long, itemId: Long?) = launchDb {

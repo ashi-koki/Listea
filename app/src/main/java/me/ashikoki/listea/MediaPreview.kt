@@ -60,7 +60,9 @@ fun MediaPreview(
     modifier: Modifier,
     unsupportedHeadline: String = "Preview unavailable",
     videoAutoplay: Boolean = true,
-    videoStartMuted: Boolean = false
+    videoStartMuted: Boolean = false,
+    isFullscreen: Boolean = false,
+    onFullscreenChange: ((Boolean) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val kind by produceState(PreviewKind.Unsupported, uri, name) {
@@ -69,7 +71,15 @@ fun MediaPreview(
 
     when (kind) {
         PreviewKind.Image -> ImagePreview(uri, name, imageLoader, modifier, unsupportedHeadline)
-        PreviewKind.Video -> VideoPreview(player, uri, modifier, videoAutoplay, videoStartMuted)
+        PreviewKind.Video -> VideoPreview(
+            player = player,
+            uri = uri,
+            modifier = modifier,
+            autoplay = videoAutoplay,
+            startMuted = videoStartMuted,
+            isFullscreen = isFullscreen,
+            onFullscreenChange = onFullscreenChange
+        )
         PreviewKind.Unsupported -> PreviewPlaceholder(modifier, unsupportedHeadline, name)
     }
 }
@@ -98,6 +108,18 @@ private fun ImagePreview(
     )
 }
 
+/**
+ * Media3 playback, with Media3's own controls and nothing of Listea's laid over them.
+ *
+ * The controls start hidden and appear on a touch. That is what `controllerAutoShow = false`
+ * buys: PlayerView otherwise shows them the moment the player becomes ready or pauses, which
+ * meant every video opened behind a bar of transport buttons whether or not it was playing.
+ * Touch shows them, touch again or the usual timeout hides them.
+ *
+ * The fullscreen button exists only when a caller has somewhere for it to go — PlayerView shows
+ * it if and only if a listener is set — so a screen that cannot go fullscreen does not display a
+ * button that would do nothing.
+ */
 @OptIn(UnstableApi::class)
 @Composable
 private fun VideoPreview(
@@ -105,7 +127,9 @@ private fun VideoPreview(
     uri: String,
     modifier: Modifier,
     autoplay: Boolean,
-    startMuted: Boolean
+    startMuted: Boolean,
+    isFullscreen: Boolean,
+    onFullscreenChange: ((Boolean) -> Unit)?
 ) {
     // Bind on enter, stop on leave, so a swiped-away or closed video never keeps playing.
     DisposableEffect(uri, autoplay, startMuted) {
@@ -123,6 +147,19 @@ private fun VideoPreview(
             PlayerView(context).apply {
                 this.player = player
                 useController = true
+                // Only a touch brings the transport controls up.
+                controllerAutoShow = false
+                hideController()
+            }
+        },
+        update = { view ->
+            if (onFullscreenChange == null) {
+                view.setFullscreenButtonClickListener(null)
+            } else {
+                view.setFullscreenButtonClickListener { onFullscreenChange(it) }
+                // Keeps the button's icon honest when the state is changed from outside it —
+                // leaving fullscreen with Back, or a swipe onto the next item.
+                view.setFullscreenButtonState(isFullscreen)
             }
         },
         modifier = modifier
@@ -140,7 +177,7 @@ fun PreviewPlaceholder(modifier: Modifier, headline: String, name: String) {
             modifier = Modifier.padding(24.dp)
         ) {
             Text(headline, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
             Text(
                 name,
                 style = MaterialTheme.typography.bodySmall,
