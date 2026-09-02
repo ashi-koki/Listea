@@ -4,9 +4,11 @@ import android.os.SystemClock
 import android.util.Log
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.decisions
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.InputStream
+import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
@@ -14,12 +16,29 @@ import java.net.UnknownHostException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import javax.net.ssl.SSLException
 
 /** Fired when a list transitions from incomplete to complete. */
 const val EVENT_LIST_COMPLETED = "list.completed"
 
 /** Fired by the "Test webhook" button. Never changes completion state. */
 const val EVENT_WEBHOOK_TEST = "list.webhook.test"
+
+/**
+ * Fired when a Quick Review reaches the end of its queue, if the user has switched Quick Review
+ * webhooks on. Its own event rather than [EVENT_LIST_COMPLETED] because the owning list is
+ * usually *not* complete: one folder of it has been reviewed. The `items` are that folder's
+ * queue, and `list` is the list they belong to.
+ */
+const val EVENT_QUICK_REVIEW_COMPLETED = "quickreview.completed"
+
+/**
+ * Fired when the user leaves a review, if the user has switched the on-exit webhook on. Carries
+ * the queue that was being reviewed — one folder for Quick Review, the whole list for Review —
+ * which is what makes "send the decisions of this round" possible when the queue was itself
+ * narrowed to unchecked items.
+ */
+const val EVENT_REVIEW_EXITED = "review.exited"
 
 private const val TIMEOUT_MS = 10_000
 
@@ -43,9 +62,20 @@ data class DeliveryResult(
 /**
  * How a completion ended up, from the user's point of view. Distinct from [DeliveryStatus], which
  * is only ever about a delivery that was actually attempted and is what gets persisted; [DISABLED]
- * never reaches the database.
+ * and [EMPTY] never reach the database, because in neither case was anything sent.
  */
-enum class NoticeOutcome { SENT, FAILED, DISABLED }
+enum class NoticeOutcome {
+    SENT,
+    FAILED,
+    DISABLED,
+
+    /**
+     * The webhook was usable and there was simply nothing to put in it: no items at all, or none
+     * left once "send checked items only" had its say. Posting `"items": []` would tell a
+     * receiver a round happened when none did, so the user is told instead.
+     */
+    EMPTY
+}
 
 /**
  * What one completion should tell the user, so a result never has to be hunted for on a folder
@@ -64,35 +94,77 @@ data class WebhookNotice(
     val outcome: NoticeOutcome,
     val httpCode: Int?,
     val error: String?,
+    /** Whether the app's default webhook was used rather than the list's own, so a switched-off
+     * webhook can name the switch the user actually has to change. */
+    val defaultWebhook: Boolean,
     val at: Long
 ) {
     val succeeded: Boolean get() = outcome == NoticeOutcome.SENT
+
+    /**
+     * Whether anything left the device, or was going to. False means nothing was even tried, and
+     * a second notice saying the same is worth collapsing rather than showing twice.
+     */
+    val attempted: Boolean
+        get() = outcome == NoticeOutcome.SENT || outcome == NoticeOutcome.FAILED
 
     val headline: String
         get() = when (outcome) {
             NoticeOutcome.SENT -> "Webhook sent"
             NoticeOutcome.FAILED -> "Webhook not sent"
             NoticeOutcome.DISABLED -> "Webhook is off"
+            NoticeOutcome.EMPTY -> "Nothing to send"
         }
 
-    val eventLabel: String
-        get() = when (event) {
-            EVENT_LIST_COMPLETED -> "List completed"
-            EVENT_WEBHOOK_TEST -> "Test webhook"
-            else -> event
-        }
+    val eventLabel: String get() = webhookEventLabel(event)
 
     /** "Success · HTTP 200", "Failed · HTTP 500", "Failed · Timeout". */
     val outcomeLabel: String
         get() = when (outcome) {
             NoticeOutcome.SENT -> "Success" + (httpCode?.let { " · HTTP $it" } ?: "")
             NoticeOutcome.FAILED -> "Failed · " + (httpCode?.let { "HTTP $it" } ?: error ?: "Failed")
-            NoticeOutcome.DISABLED -> "Nothing was sent · this list's webhook is switched off"
+            NoticeOutcome.DISABLED -> "Nothing was sent · " + if (defaultWebhook) {
+                "the default webhook is switched off"
+            } else {
+                "this list's webhook is switched off"
+            }
+            NoticeOutcome.EMPTY -> "Nothing was sent · there were no items to send"
         }
 
     val timeLabel: String
         get() = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(at))
 }
+
+/**
+ * What an event is called in front of the user. One mapping, so a live result and a record of an
+ * old one can never name the same event differently. An unrecognised event answers with itself
+ * rather than with nothing.
+ */
+fun webhookEventLabel(event: String): String = when (event) {
+    EVENT_LIST_COMPLETED -> "List completed"
+    EVENT_WEBHOOK_TEST -> "Test webhook"
+    EVENT_QUICK_REVIEW_COMPLETED -> "Quick Review completed"
+    EVENT_REVIEW_EXITED -> "Review left"
+    else -> event
+}
+
+/**
+ * A full "2026-09-01 16:40:05" stamp, for a record that has to be told apart from the others
+ * rather than placed in the last few minutes. Live notices use the shorter [WebhookNotice.timeLabel].
+ */
+fun webhookTimestampLabel(at: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(at))
+
+/**
+ * Whether this notice tells the user anything the ones already waiting have not.
+ *
+ * A delivery that was attempted always does: two attempts are two events, and hiding one would
+ * misrepresent what left the device. A result where nothing was attempted does not, if the same
+ * list has already produced that same result — one swipe can finish a review and complete its
+ * list at the same moment, and being told twice over that a webhook is switched off is noise.
+ */
+fun WebhookNotice.addsTo(queued: List<WebhookNotice>): Boolean =
+    attempted || queued.none { it.outcome == outcome && it.listTitle == listTitle }
 
 /** Host of a webhook URL, for showing where something went without exposing the full URL. */
 fun webhookHost(url: String): String? =
@@ -107,6 +179,17 @@ fun webhookUrlError(url: String): String? {
     if (parsed.host.isNullOrBlank()) return "URL is missing a host"
     return null
 }
+
+/**
+ * The items a payload should actually carry, out of the ones the event covers.
+ *
+ * The one place the "only send checked items" setting is applied, so it holds for every event
+ * including the test one: what the test button sends stays an honest preview of a real delivery.
+ * An event whose items are all unchecked legitimately sends an empty `items` array — a receiver
+ * being told "nothing was checked" is not the same as it being told nothing.
+ */
+fun webhookItems(items: List<ListItemEntity>, settings: AppSettings): List<ListItemEntity> =
+    if (settings.webhookCompletedItemsOnly) items.filter { it.isCompleted } else items
 
 /**
  * The webhook body. Timestamps are epoch milliseconds. This is a deliberately fixed shape:
@@ -145,7 +228,7 @@ fun buildWebhookPayload(
  */
 private fun itemJson(list: ListEntity, item: ListItemEntity, settings: AppSettings): JSONObject {
     val actions = JSONArray()
-    itemActionNames(item, settings).forEach { actions.put(it) }
+    itemActionNames(item.decisions, settings).forEach { actions.put(it) }
     return JSONObject()
         .put("id", item.id)
         .put("title", item.title)
@@ -155,15 +238,19 @@ private fun itemJson(list: ListEntity, item: ListItemEntity, settings: AppSettin
 }
 
 /**
- * The item's path relative to the selected SAF synchronization root, e.g.
- * `2026-07-11/bilibili/sub/a.jpg`: the list's root-relative folder path followed by the item's
- * list-relative source path. Null for manual items, which have no source file at all; a fake path
- * would be worse than none for a downstream tool.
+ * The item's *folder*, relative to the selected SAF synchronization root, e.g. `2026-07-11/bilibili`
+ * for an item stored at `2026-07-11/bilibili/a.jpg`: the list's root-relative folder path followed
+ * by the item's list-relative subfolders, with the file name dropped. The name is already on the
+ * wire as `title`, so a receiver that wants the whole path joins the two.
+ *
+ * Empty for an item sitting directly in a list linked to the root itself, which is exactly that
+ * item's folder. Null for manual items, which have no source file at all; a fake path would be
+ * worse than none for a downstream tool.
  */
 fun webhookRelativePath(list: ListEntity, item: ListItemEntity): String? {
     val itemSegments = pathSegments(item.sourceRelativePath)
     if (itemSegments.isEmpty()) return null
-    return (pathSegments(list.sourceRelativePath) + itemSegments).joinToString("/")
+    return (pathSegments(list.sourceRelativePath) + itemSegments.dropLast(1)).joinToString("/")
 }
 
 /** Splits on "/" and drops empty segments, so leading, trailing and doubled separators cannot survive. */
@@ -177,14 +264,17 @@ private fun pathSegments(path: String?): List<String> =
  */
 fun postWebhook(url: String, jsonBody: String): DeliveryResult {
     var connection: HttpURLConnection? = null
+    // Kept outside the try so a failure can still say where it was going.
+    var target: URL? = null
     val startedAt = SystemClock.elapsedRealtime()
     fun elapsed() = SystemClock.elapsedRealtime() - startedAt
     var connectedMs = -1L
     var sentMs = -1L
 
     return try {
-        val target = URL(url)
-        connection = (target.openConnection() as HttpURLConnection).apply {
+        val destination = URL(url)
+        target = destination
+        connection = (destination.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = TIMEOUT_MS
             readTimeout = TIMEOUT_MS
@@ -195,7 +285,7 @@ fun postWebhook(url: String, jsonBody: String): DeliveryResult {
         if (DIAGNOSTICS) {
             Log.d(
                 TAG,
-                "-> POST $target host=${target.host} port=${target.port} " +
+                "-> POST $destination host=${destination.host} port=${destination.port} " +
                     "followRedirects=${connection.instanceFollowRedirects} " +
                     "connectTimeout=${TIMEOUT_MS}ms readTimeout=${TIMEOUT_MS}ms " +
                     "bodyBytes=${bodyBytes.size}"
@@ -223,7 +313,7 @@ fun postWebhook(url: String, jsonBody: String): DeliveryResult {
 
         if (DIAGNOSTICS) {
             val line = "<- status=$code finalUrl=${connection.url} " +
-                "redirected=${connection.url.toString() != target.toString()} " +
+                "redirected=${connection.url.toString() != destination.toString()} " +
                 "contentType=${connection.getHeaderField("Content-Type")} " +
                 "connect=${connectedMs}ms sent=${sentMs}ms headers=${headersMs}ms total=${elapsed()}ms"
             if (success) Log.d(TAG, line) else Log.w(TAG, "$line body=$snippet")
@@ -243,7 +333,7 @@ fun postWebhook(url: String, jsonBody: String): DeliveryResult {
                     "connect=${connectedMs}ms sent=${sentMs}ms failedAt=${elapsed()}ms"
             )
         }
-        DeliveryResult(DeliveryStatus.FAILED, null, shortError(e))
+        DeliveryResult(DeliveryStatus.FAILED, null, webhookErrorLabel(e, target))
     } finally {
         connection?.disconnect()
     }
@@ -269,30 +359,56 @@ private fun drainBody(stream: InputStream?, keepSnippet: Boolean): String? = run
     }
 }.getOrNull()
 
-private fun shortError(e: Throwable): String = when (e) {
-    is SocketTimeoutException -> "Timeout"
-    is UnknownHostException -> "Host not found"
-    else -> (e.message ?: e::class.java.simpleName).take(120)
+/**
+ * A network failure in words that describe the delivery, not the JDK.
+ *
+ * The platform's own wording for these is shaped like `Failed to connect to
+ * example.com/93.184.216.34:443` — hostname, slash, *resolved address*, port. That reads exactly
+ * like a URL with a path, so a reader compares it against the URL they configured, finds a
+ * stretch of it replaced by numbers, and reasonably concludes the app mangled their address.
+ * Nothing was rewritten: the numbers are what DNS answered with.
+ *
+ * So the target is named from the [URL] Listea actually opened, and the resolved address is left
+ * to the logcat diagnostics, which is where an address worth arguing with belongs. [target] is
+ * null only when the URL itself would not parse, and then the message simply says less.
+ */
+internal fun webhookErrorLabel(e: Throwable, target: URL?): String {
+    val where = target?.let { url ->
+        // The effective port, so https says 443 rather than the -1 an unstated port parses to.
+        url.host + ":" + (if (url.port != -1) url.port else url.defaultPort)
+    }
+    fun at(prefix: String) = if (where == null) prefix else "$prefix $where"
+    return when (e) {
+        is SocketTimeoutException -> at("Timed out reaching")
+        is UnknownHostException -> at("Host not found:")
+        is ConnectException -> at("Could not connect to")
+        is SSLException -> at("TLS failed for")
+        else -> (e.message ?: e::class.java.simpleName).take(120)
+    }
 }
 
 /**
  * Compact webhook state for a browse row, e.g. "Webhook · On · Failed · HTTP 500".
  * Deliberately omits the URL, timestamp and error text so folder cards and list rows stay
  * glanceable; the List detail screen shows the fuller [deliveryLabel] instead.
- * A delivery always records its timestamp and status together, so a null [lastDeliveryStatus]
- * means nothing has been sent yet.
+ *
+ * Two independent facts, and both are always reported: whether the webhook will fire from here
+ * on, and what happened the last time it did. Switching a webhook off says nothing about what it
+ * already sent, so a list that delivered and was then switched off reads "Off · Success" rather
+ * than losing its history to a toggle. A delivery always records its timestamp and status
+ * together, so a null [lastDeliveryStatus] means nothing has ever been sent.
  */
 fun webhookStatusLabel(
     enabled: Boolean,
     lastDeliveryStatus: String?,
     lastDeliveryCode: Int?
 ): String {
-    if (!enabled) return "Webhook · Off"
-    return "Webhook · On · " + when (lastDeliveryStatus) {
+    val delivery = when (lastDeliveryStatus) {
         null -> "Never sent"
         DeliveryStatus.SUCCESS.name -> "Success"
         else -> "Failed" + (lastDeliveryCode?.let { " · HTTP $it" } ?: "")
     }
+    return "Webhook · " + (if (enabled) "On" else "Off") + " · " + delivery
 }
 
 /** "Last delivery: Success / 18:42", or a short failure reason. */

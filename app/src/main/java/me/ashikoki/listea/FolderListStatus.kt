@@ -1,5 +1,6 @@
 package me.ashikoki.listea
 
+import me.ashikoki.listea.data.FileCompletion
 import me.ashikoki.listea.data.FolderListScope
 import me.ashikoki.listea.data.SourceItemRef
 
@@ -35,12 +36,20 @@ data class SubtreeProgress(val completed: Int, val total: Int)
 
 /**
  * Scopes plus derived per-folder progress and per-file checked state, observed once for the whole
- * Folder screen. Both maps are keyed by owning list id and root-relative path.
+ * Folder screen.
+ *
+ * Two different keyings, on purpose. [subtreeProgress] and [itemCompletion] are about a *list* —
+ * how far through its subtree it is, and which of its members are done — so they are keyed by
+ * owning list id and root-relative path. [fileCompletion] is about a *file*, keyed by path alone,
+ * and covers every file under the root that anything has ever been decided about, whether or not
+ * a list has heard of it. The browser's tick reads the second one first: a file reviewed in a
+ * folder no list covers is checked, and saying otherwise would be wrong.
  */
 data class FolderOwnership(
     val scopes: List<FolderListScope> = emptyList(),
     val subtreeProgress: Map<Pair<Long, String>, SubtreeProgress> = emptyMap(),
-    val itemCompletion: Map<Pair<Long, String>, Boolean> = emptyMap()
+    val itemCompletion: Map<Pair<Long, String>, Boolean> = emptyMap(),
+    val fileCompletion: Map<String, Boolean> = emptyMap()
 )
 
 /**
@@ -53,7 +62,8 @@ data class FolderOwnership(
  */
 fun buildFolderOwnership(
     scopes: List<FolderListScope>,
-    items: List<SourceItemRef>
+    items: List<SourceItemRef>,
+    files: List<FileCompletion> = emptyList()
 ): FolderOwnership {
     val scopePathById = scopes.associate { it.id to (it.relativePath ?: "") }
     // [total, completed] per (listId, folder path)
@@ -81,7 +91,8 @@ fun buildFolderOwnership(
         subtreeProgress = counts.mapValues { (_, bucket) ->
             SubtreeProgress(completed = bucket[1], total = bucket[0])
         },
-        itemCompletion = completion
+        itemCompletion = completion,
+        fileCompletion = files.associate { it.relativePath to it.isCompleted }
     )
 }
 

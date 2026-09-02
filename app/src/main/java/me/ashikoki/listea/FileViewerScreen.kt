@@ -1,25 +1,15 @@
 package me.ashikoki.listea
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.media3.exoplayer.ExoPlayer
@@ -56,25 +46,28 @@ fun FileViewerScreen(
     var currentUri by rememberSaveable(initial.uri) { mutableStateOf(initial.uri.toString()) }
     // Not saved: rotating should return to the file, not to a sheet about it.
     var infoOpen by remember { mutableStateOf(false) }
-    var fullscreen by remember { mutableStateOf(false) }
+    // Toggled by a tap on the media, and kept across paging: this is the gallery behaviour, where
+    // putting the bars away is a decision about the whole browse and not about one file.
+    var chromeVisible by rememberSaveable { mutableStateOf(true) }
 
     // A background refresh can drop a file from the folder while it is open. Rather than close on
     // the user, fall back to showing the one they actually tapped, without siblings to page to.
     val index = files.indexOfFirst { it.uri.toString() == currentUri }
     val entry = files.getOrNull(index) ?: initial
 
-    // Paging onto a still image must not leave the chrome hidden with no way to bring it back.
-    LaunchedEffect(currentUri) { fullscreen = false }
-    FullscreenSystemBars(fullscreen)
-    // Back leaves fullscreen first, and only then the viewer.
-    BackHandler { if (fullscreen) fullscreen = false else onClose() }
+    // The system bars come and go with Listea's own, so a hidden chrome means a full-bleed file.
+    MediaSystemBars(chromeVisible)
+    // Back closes the viewer whatever the chrome is doing. Hiding it is not a mode to escape from
+    // - a tap anywhere brings it straight back - so making Back mean "show the bars again" would
+    // only ever cost a second press on the way out.
+    BackHandler { onClose() }
 
     MediaShell(
         modifier = modifier,
         title = entry.name,
         position = if (index >= 0) "${index + 1} / ${files.size}" else null,
         onBack = onClose,
-        chromeVisible = !fullscreen,
+        chromeVisible = chromeVisible,
         media = {
             SwipeCard(
                 key = currentUri,
@@ -82,8 +75,9 @@ fun FileViewerScreen(
                 canSwipeBack = index > 0,
                 onSwipeForward = { currentUri = files[index + 1].uri.toString() },
                 onSwipeBack = { currentUri = files[index - 1].uri.toString() },
-                modifier = Modifier.fillMaxSize()
-            ) {
+                modifier = Modifier.fillMaxSize(),
+                onTap = { chromeVisible = !chromeVisible }
+            ) { zoom ->
                 MediaPreview(
                     uri = entry.uri.toString(),
                     name = entry.name,
@@ -92,25 +86,13 @@ fun FileViewerScreen(
                     modifier = Modifier.fillMaxSize(),
                     videoAutoplay = settings.videoAutoplay,
                     videoStartMuted = settings.videoStartMuted,
-                    isFullscreen = fullscreen,
-                    onFullscreenChange = { fullscreen = it }
+                    zoom = zoom
                 )
             }
         },
         // A gallery has no business actions: no completion, no favourite, no custom slots.
         // The one control is the one that answers "what am I looking at?".
-        controls = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = ListeaDimens.RowGap),
-                horizontalArrangement = Arrangement.End
-            ) {
-                IconButton(onClick = { infoOpen = true }) {
-                    Icon(Icons.Outlined.Info, contentDescription = "File info")
-                }
-            }
-        }
+        controls = { MediaInfoBar("File info") { infoOpen = true } }
     )
 
     if (infoOpen) {

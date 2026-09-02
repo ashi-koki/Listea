@@ -1,10 +1,12 @@
 package me.ashikoki.listea
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
@@ -18,6 +20,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -71,7 +74,11 @@ enum class TopLevelDestination(val label: String, val title: String, val icon: I
  * keeps its position in the composition when a nested screen opens, so opening Quick Review or a
  * file viewer cannot remount the Folder screen underneath and throw away where the user was.
  *
- * Nested screens supply their own back affordance through [ListeaNestedScaffold] or [MediaShell].
+ * Nested screens supply their own back affordance through [ListeaNestedScaffold] or [MediaShell],
+ * and their own system-bar insets. The shell stops insetting its content the moment it stops
+ * drawing chrome, because the one thing a nested media screen must be able to do is fill the
+ * display - status bar and navigation bar included - and it cannot do that through a padding the
+ * shell has already applied on its behalf.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,6 +91,11 @@ fun ListeaTopLevelScaffold(
 ) {
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        contentWindowInsets = if (showChrome) {
+            ScaffoldDefaults.contentWindowInsets
+        } else {
+            WindowInsets(0, 0, 0, 0)
+        },
         topBar = {
             if (showChrome) {
                 TopAppBar(title = { Text(destination.title) })
@@ -122,6 +134,9 @@ fun ListeaBottomNavigation(
  * No bottom navigation — a nested page is somewhere you came *from* somewhere, and the way out is
  * back, not sideways. The bar is compact so the body gets the screen, which is the point of
  * taking the old app-wide header and tab row off these pages.
+*
+ * It insets itself against the system bars, because the shell no longer does that for a nested
+ * screen - see [ListeaTopLevelScaffold]. Only the media screens want the space under those bars.
  */
 @Composable
 fun ListeaNestedScaffold(
@@ -132,7 +147,7 @@ fun ListeaNestedScaffold(
     trailing: @Composable (() -> Unit)? = null,
     content: @Composable (Modifier) -> Unit
 ) {
-    Column(modifier.fillMaxSize()) {
+    Column(modifier.fillMaxSize().safeDrawingPadding()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -164,6 +179,15 @@ fun ListeaNestedScaffold(
         content(Modifier.weight(1f))
     }
 }
+
+/**
+ * "1 file", "4 files": the one place the app pluralises a count of something.
+ *
+ * There were two identical private copies of this, in the Folder screen and in Settings, and a
+ * third caller was about to make it three.
+ */
+fun countLabel(count: Int, noun: String): String =
+    "$count $noun" + if (count == 1) "" else "s"
 
 /** A quiet heading above a group of rows. */
 @Composable

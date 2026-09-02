@@ -2,6 +2,7 @@ package me.ashikoki.listea
 
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.decisions
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -40,7 +41,7 @@ class WebhookPayloadTest {
     @Test
     fun `path is relative to the sync root, not to the list folder`() {
         assertEquals(
-            "2026-07-11/bilibili/example.jpg",
+            "2026-07-11/bilibili",
             webhookRelativePath(list("2026-07-11/bilibili"), item("example.jpg"))
         )
     }
@@ -48,21 +49,35 @@ class WebhookPayloadTest {
     @Test
     fun `nested item keeps its subfolders`() {
         assertEquals(
-            "2026-07-11/bilibili/sub/a.jpg",
+            "2026-07-11/bilibili/sub",
             webhookRelativePath(list("2026-07-11/bilibili"), item("sub/a.jpg"))
         )
     }
 
     @Test
+    fun `the file name is never part of the path`() {
+        // A file and a folder that share a name must still resolve to the same parent.
+        assertEquals(
+            "2026-07-11/bilibili/sub",
+            webhookRelativePath(list("2026-07-11/bilibili"), item("sub/sub"))
+        )
+    }
+
+    @Test
+    fun `an item directly in a list linked to the root has an empty path`() {
+        assertEquals("", webhookRelativePath(list(""), item("a.jpg")))
+    }
+
+    @Test
     fun `a list linked to the root itself adds no prefix`() {
-        assertEquals("a.jpg", webhookRelativePath(list(""), item("a.jpg")))
+        assertEquals("sub", webhookRelativePath(list(""), item("sub/a.jpg")))
     }
 
     @Test
     fun `stray separators cannot produce a doubled slash`() {
         assertEquals(
-            "2026-07-11/bilibili/a.jpg",
-            webhookRelativePath(list("/2026-07-11/bilibili/"), item("/a.jpg"))
+            "2026-07-11/bilibili/sub",
+            webhookRelativePath(list("/2026-07-11/bilibili/"), item("/sub/a.jpg"))
         )
     }
 
@@ -74,22 +89,28 @@ class WebhookPayloadTest {
     @Test
     fun `actions serialize in a fixed order, whatever is set`() {
         val settings = AppSettings()
-        assertEquals(emptyList<String>(), itemActionNames(item("a.jpg"), settings))
-        assertEquals(listOf("favorite"), itemActionNames(item("a.jpg", favorite = true), settings))
+        assertEquals(emptyList<String>(), itemActionNames(item("a.jpg").decisions, settings))
+        assertEquals(
+            listOf("favorite"),
+            itemActionNames(item("a.jpg", favorite = true).decisions, settings)
+        )
         assertEquals(
             listOf("favorite", "cust2"),
-            itemActionNames(item("a.jpg", favorite = true, custom2 = true), settings)
+            itemActionNames(item("a.jpg", favorite = true, custom2 = true).decisions, settings)
         )
         assertEquals(
             listOf("favorite", "cust1", "cust2"),
-            itemActionNames(item("a.jpg", favorite = true, custom1 = true, custom2 = true), settings)
+            itemActionNames(
+                item("a.jpg", favorite = true, custom1 = true, custom2 = true).decisions,
+                settings
+            )
         )
     }
 
     @Test
     fun `completion and actions are independent`() {
         val settings = AppSettings()
-        val unchecked = item("a.jpg", custom1 = true).copy(isCompleted = false)
+        val unchecked = item("a.jpg", custom1 = true).decisions.copy(isCompleted = false)
         assertEquals(listOf("cust1"), itemActionNames(unchecked, settings))
         assertEquals(listOf("cust1"), itemActionNames(unchecked.copy(isCompleted = true), settings))
     }
@@ -100,7 +121,7 @@ class WebhookPayloadTest {
         assertEquals(
             listOf("favorite", "tag1", "tag2"),
             itemActionNames(
-                item("a.jpg", favorite = true, custom1 = true, custom2 = true),
+                item("a.jpg", favorite = true, custom1 = true, custom2 = true).decisions,
                 settings
             )
         )
@@ -110,7 +131,10 @@ class WebhookPayloadTest {
     fun `favorite is not configurable`() {
         // Renaming the custom slots must never touch the one fixed action.
         val settings = AppSettings(custom1WebhookValue = "favorite")
-        assertEquals(listOf("favorite"), itemActionNames(item("a.jpg", favorite = true), settings))
+        assertEquals(
+            listOf("favorite"),
+            itemActionNames(item("a.jpg", favorite = true).decisions, settings)
+        )
     }
 
     @Test
@@ -118,7 +142,7 @@ class WebhookPayloadTest {
         val settings = AppSettings(custom1WebhookValue = "tag", custom2WebhookValue = "tag")
         assertEquals(
             listOf("tag"),
-            itemActionNames(item("a.jpg", custom1 = true, custom2 = true), settings)
+            itemActionNames(item("a.jpg", custom1 = true, custom2 = true).decisions, settings)
         )
     }
 
@@ -126,7 +150,7 @@ class WebhookPayloadTest {
     fun `renaming a slot does not change which slots are selected`() {
         // The boolean means "slot 1 is selected", so the item is untouched and only the emitted
         // string moves. This is the whole point of keeping names out of the item row.
-        val marked = item("a.jpg", custom1 = true)
+        val marked = item("a.jpg", custom1 = true).decisions
         assertEquals(listOf("cust1"), itemActionNames(marked, AppSettings()))
         assertEquals(
             listOf("archive"),

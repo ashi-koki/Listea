@@ -2,6 +2,7 @@ package me.ashikoki.listea
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -32,6 +33,37 @@ data class DirRef(val uri: Uri, val name: String)
 fun hasPersistedReadAccess(context: Context, rootUri: Uri): Boolean =
     context.contentResolver.persistedUriPermissions
         .any { it.uri == rootUri && it.isReadPermission }
+
+/**
+ * True when the grant on the root also covers writing, which deleting a file needs.
+ *
+ * Separate from [hasPersistedReadAccess] because it can legitimately be false on a root that
+ * works perfectly for everything else: browsing, scanning and reviewing only ever read, and a
+ * root granted by an older version of Listea — or by a provider that hands out read-only trees —
+ * is still a good root. File management asks for this before offering to delete anything.
+ */
+fun hasPersistedWriteAccess(context: Context, rootUri: Uri): Boolean =
+    context.contentResolver.persistedUriPermissions
+        .any { it.uri == rootUri && it.isWritePermission }
+
+/**
+ * Where the folder picker should open when Listea already holds [treeUri].
+ *
+ * The picker's initial location is read as a *document* URI, not as the tree URI that names the
+ * grant — handed the tree URI it finds no document id in it, ignores the hint entirely and opens
+ * wherever it last was. That is why re-granting used to mean walking the whole path down by hand.
+ * Rebuilding the very same folder as a document inside its own tree is what the picker will
+ * actually follow.
+ *
+ * Null when [treeUri] is not a tree URI after all, which simply means no starting point: the
+ * picker opens at its default rather than the caller having to care.
+ */
+fun initialPickerUri(treeUri: Uri): Uri? = runCatching {
+    DocumentsContract.buildDocumentUriUsingTree(
+        treeUri,
+        DocumentsContract.getTreeDocumentId(treeUri)
+    )
+}.getOrNull()
 
 /**
  * Reads the direct children of [dirUri] (the selected root, or any directory below it).

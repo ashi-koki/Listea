@@ -3,20 +3,28 @@ package me.ashikoki.listea
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -34,14 +42,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
@@ -51,31 +70,64 @@ import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import me.ashikoki.listea.data.ItemAction
-import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.ReviewItem
+import me.ashikoki.listea.ui.theme.ListeaMediaChromeTheme
 
 /**
- * The V4.2 media surface, shared by Full Review, Quick Review and the folder File Viewer.
+ * The V4.3 media surface, shared by Full Review, Quick Review and the folder File Viewer.
  *
- * One presentation for all three: a thin bar, the media taking everything else, and whatever
- * controls the screen actually has. There is no subtitle slot and no hint slot — not "unused by
- * default" but absent, because the reason the old media screens lost a third of their height was
- * that those slots existed and every caller filled them. What used to live there is in
- * [ItemInfoSheet] now, opened on request.
+ * One presentation for all three, and two layers rather than one column: the media fills the
+ * screen, and the bars are drawn *over* it. Nothing about the chrome changes how large the media
+ * is, which is the whole point - a 16:9 photograph in landscape used to be squeezed into whatever
+ * a fixed top bar and a fixed action row left behind, and came out smaller than the same
+ * photograph in portrait.
+ *
+ * There is no subtitle slot and no hint slot - not "unused by default" but absent. What used to
+ * live there is in [ItemInfoSheet], opened on request.
  */
 
 /**
- * The frame every media screen shares.
+ * How much of the media surface the chrome is covering, published to whatever is inside it.
  *
- * The media Box is the only thing with a weight, so it absorbs every pixel the bar and the
- * controls do not take, in either orientation. Its background is black rather than a theme
- * surface: [androidx.compose.ui.layout.ContentScale.Fit] letterboxes almost everything, and a
- * photograph reads better against black in a light theme than a light theme reads against a
- * photograph.
+ * Only the video player reads this. An image does not care that a bar is sitting on top of it -
+ * it is letterboxed and centred either way - but a video brings its own controls, and those have
+ * to land somewhere the action bar is not. See [LocalMediaChrome].
+ */
+@Immutable
+data class MediaChromeInsets(
+    val visible: Boolean = false,
+    val top: Dp = 0.dp,
+    val bottom: Dp = 0.dp
+)
+
+/**
+ * The chrome's footprint, ambient to everything [MediaShell] draws media into.
  *
- * [chromeVisible] is how a video goes fullscreen: the bar and the controls are not composed at
- * all, so the media Box's weight is the whole screen. The media itself is untouched by the
- * switch — nothing is rebuilt, nothing is remeasured into a different tree, and playback carries
- * straight on across the toggle.
+ * A local rather than a parameter because the only reader is four call hops down - shell, swipe
+ * card, item preview, renderer - through two screens that have no interest in the value and would
+ * each have to carry it anyway. Anything composed outside a [MediaShell] sees an empty, invisible
+ * chrome, which is the right answer for a thumbnail or a preview.
+ */
+val LocalMediaChrome = compositionLocalOf { MediaChromeInsets() }
+
+/**
+ * The frame every media screen shares: media underneath, chrome on top of it.
+ *
+ * The media slot is given the whole box in both orientations, always, and is composed exactly
+ * once - [chromeVisible] adds and removes the two bars *beside* it in the stack, never around it,
+ * so toggling them cannot remeasure the media, restart a decode or interrupt playback.
+ *
+ * The background is black rather than a theme surface: ContentScale.Fit letterboxes almost
+ * everything, and a photograph reads better against black in a light theme than a light theme
+ * reads against a photograph. The bars are a scrim over that, with their contents forced to the
+ * dark scheme by [ListeaMediaChromeTheme] so they stay legible whatever is behind them.
+ *
+ * Toggling [chromeVisible] is not this composable's business. The gesture that does it belongs to
+ * the media - a tap has to miss the bars to count - so the state is hoisted to the screen and
+ * driven from the swipe card, which is also what keeps it independent of which item is showing.
+ *
+ * Each bar carries its own system-bar inset. The media deliberately carries none: it runs edge to
+ * edge, under the status and navigation bars, exactly as a gallery does.
  */
 @Composable
 fun MediaShell(
@@ -87,42 +139,137 @@ fun MediaShell(
     controls: @Composable (() -> Unit)? = null,
     media: @Composable () -> Unit
 ) {
-    Column(modifier.fillMaxSize()) {
-        if (chromeVisible) {
-            MediaTopBar(title = title, position = position, onBack = onBack)
-        }
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .background(Color.Black)
+    // What the bars actually measured, so a video's own controls can sit between them rather than
+    // under them. Reported as zero while the chrome is down, which is when the bar that measured
+    // the height is not on screen to be avoided.
+    var topBarHeight by remember { mutableStateOf(0.dp) }
+    var bottomBarHeight by remember { mutableStateOf(0.dp) }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        CompositionLocalProvider(
+            LocalMediaChrome provides MediaChromeInsets(
+                visible = chromeVisible,
+                top = if (chromeVisible) topBarHeight else 0.dp,
+                bottom = if (chromeVisible) bottomBarHeight else 0.dp
+            )
         ) {
             media()
         }
-        if (chromeVisible) controls?.invoke()
+
+        AnimatedVisibility(
+            visible = chromeVisible,
+            modifier = Modifier.align(Alignment.TopCenter),
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            MediaChromeBar(
+                insets = WindowInsets.safeDrawing
+                    .only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+                onHeightChange = { topBarHeight = it }
+            ) {
+                MediaTopBar(title = title, position = position, onBack = onBack)
+            }
+        }
+
+        controls?.let { bar ->
+            AnimatedVisibility(
+                visible = chromeVisible,
+                modifier = Modifier.align(Alignment.BottomCenter),
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                MediaChromeBar(
+                    insets = WindowInsets.safeDrawing
+                        .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
+                    onHeightChange = { bottomBarHeight = it }
+                ) {
+                    bar()
+                }
+            }
+        }
     }
 }
 
 /**
- * Takes the status and navigation bars away while [active], and gives them back on the way out.
+ * One scrimmed bar of chrome, laid over the media and reporting how much of it it hides.
  *
- * Only ever driven by the player's own fullscreen button. The transient-swipe behaviour means the
- * bars are always one gesture away, so nothing here can strand the user, and [DisposableEffect]
- * restores them however the screen is left — back, a swipe, or the activity going away.
+ * The scrim sits outside the inset padding, so it runs under the status or navigation bar rather
+ * than stopping short of it and leaving the system icons on the bare photograph. The reported
+ * height is the whole node, inset included, because that is the part of the media the caller
+ * cannot use.
+ *
+ * 60% black is PlayerControlView's own scrim value; matching it is what makes a video's controls
+ * and Listea's bars read as one dimmed layer instead of three.
  */
 @Composable
-fun FullscreenSystemBars(active: Boolean) {
+private fun MediaChromeBar(
+    insets: WindowInsets,
+    onHeightChange: (Dp) -> Unit,
+    content: @Composable () -> Unit
+) {
+    val density = LocalDensity.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onSizeChanged { onHeightChange(with(density) { it.height.toDp() }) }
+            .background(MediaChromeScrim)
+            .windowInsetsPadding(insets)
+    ) {
+        ListeaMediaChromeTheme { content() }
+    }
+}
+
+private val MediaChromeScrim = Color.Black.copy(alpha = 0.6f)
+
+/**
+ * Ties the system bars to Listea's own: both sets are up together, or neither is.
+ *
+ * A media screen owns the whole display while it is open, so it owns the status and navigation
+ * bars too. Hiding the chrome hides them as well - that is what "the picture is as large as the
+ * screen" has to mean - and the hide is the transient-by-swipe kind, so the bars are always one
+ * gesture away and nothing here can strand the user. A tap on the media brings everything back
+ * at once.
+ *
+ * The bar icons are forced light for as long as the screen is up, because what is behind them is
+ * either black or a photograph, never the app's surface. [DisposableEffect] restores the
+ * appearance and the bars themselves however the screen is left - back, a swipe, or the activity
+ * going away.
+ */
+@Composable
+fun MediaSystemBars(chromeVisible: Boolean) {
     val view = LocalView.current
-    DisposableEffect(active, view) {
-        val window = (view.context.findActivity())?.window
-        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
-        if (active && controller != null) {
-            controller.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(WindowInsetsCompat.Type.systemBars())
-        }
+    val controller = remember(view) {
+        view.context.findActivity()?.window?.let { WindowCompat.getInsetsController(it, view) }
+    }
+
+    DisposableEffect(controller) {
+        val active = controller ?: return@DisposableEffect onDispose { }
+        val hadLightStatusBars = active.isAppearanceLightStatusBars
+        val hadLightNavigationBars = active.isAppearanceLightNavigationBars
+        active.isAppearanceLightStatusBars = false
+        active.isAppearanceLightNavigationBars = false
+        active.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         onDispose {
-            if (active) controller?.show(WindowInsetsCompat.Type.systemBars())
+            active.show(WindowInsetsCompat.Type.systemBars())
+            active.isAppearanceLightStatusBars = hadLightStatusBars
+            active.isAppearanceLightNavigationBars = hadLightNavigationBars
+        }
+    }
+
+    // Keyed on the state rather than run on every recomposition: while the chrome is down the
+    // user can still swipe the system bars back transiently, and re-issuing hide() from an
+    // unrelated recomposition would take them away again mid-glance.
+    LaunchedEffect(controller, chromeVisible) {
+        val active = controller ?: return@LaunchedEffect
+        if (chromeVisible) {
+            active.show(WindowInsetsCompat.Type.systemBars())
+        } else {
+            active.hide(WindowInsetsCompat.Type.systemBars())
         }
     }
 }
@@ -174,9 +321,9 @@ private fun MediaTopBar(title: String, position: String?, onBack: () -> Unit) {
 /**
  * The one review action row, used by Full Review and Quick Review alike.
  *
- * Every control edits the real [ListItemEntity] through the caller's ViewModel calls, which is
- * what keeps a completion reached in Quick Review indistinguishable from one reached in Review —
- * including the webhook it may fire. Nothing here navigates.
+ * Every control edits the decisions the [ReviewItem] carries, through the caller's ViewModel
+ * calls, which is what keeps a decision reached in Quick Review indistinguishable from one
+ * reached in Review — including the webhook it may fire. Nothing here navigates.
  *
  * It sits outside the swipe detector, as a sibling of the media rather than a child of it, so a
  * tap or a drag that starts on a chip can never be read as a swipe.
@@ -198,7 +345,7 @@ private fun MediaTopBar(title: String, position: String?, onBack: () -> Unit) {
  */
 @Composable
 fun ReviewActionBar(
-    item: ListItemEntity,
+    item: ReviewItem,
     settings: AppSettings,
     onToggleCompleted: (Boolean) -> Unit,
     onToggleAction: (ItemAction, Boolean) -> Unit,
@@ -212,10 +359,11 @@ fun ReviewActionBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Checkbox(
-            checked = item.isCompleted,
+            checked = item.decisions.isCompleted,
             onCheckedChange = onToggleCompleted,
             modifier = Modifier.semantics {
-                contentDescription = if (item.isCompleted) "Checked" else "Not checked"
+                contentDescription =
+                    if (item.decisions.isCompleted) "Checked" else "Not checked"
             }
         )
 
@@ -232,7 +380,7 @@ fun ReviewActionBar(
         ) {
             // Fixed order, so the row never reshuffles as actions are toggled.
             ItemAction.entries.forEach { action ->
-                val isSet = action.isSetOn(item)
+                val isSet = action.isSetOn(item.decisions)
                 if (action == ItemAction.FAVORITE) {
                     // The only action whose meaning is fixed, so it is the only one shown as a
                     // symbol; the custom slots say whatever Settings has named them.
@@ -273,6 +421,28 @@ fun ReviewActionBar(
 }
 
 private val CustomActionLabelMaxWidth = 88.dp
+
+/**
+ * The bottom bar of a viewer that has no actions: one control, and all it does is open a panel.
+ *
+ * Shared by the folder File Viewer and the list item viewer, which are both deliberately unable
+ * to change anything about what they are showing. That they look identical is the point - one is
+ * reached from a folder and the other from a list, and neither is a place where decisions get
+ * made, so neither should grow a control that suggests otherwise.
+ */
+@Composable
+fun MediaInfoBar(contentDescription: String, onInfo: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = ListeaDimens.RowGap),
+        horizontalArrangement = Arrangement.End
+    ) {
+        IconButton(onClick = onInfo) {
+            Icon(Icons.Outlined.Info, contentDescription = contentDescription)
+        }
+    }
+}
 
 /** One labelled fact about whatever the media screen is showing. */
 data class InfoField(val label: String, val value: String)

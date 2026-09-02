@@ -9,8 +9,13 @@ import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.execSQL
 
 @Database(
-    entities = [ListEntity::class, ListItemEntity::class],
-    version = 6,
+    entities = [
+        ListEntity::class,
+        ListItemEntity::class,
+        UnsentWebhookEntity::class,
+        FileReviewStateEntity::class
+    ],
+    version = 9,
     exportSchema = false
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -78,6 +83,112 @@ abstract class ListeaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * V4.5 keeps the webhook bodies that never got through, so a misconfigured endpoint
+         * costs a resend rather than a round of review. A new table only: nothing existing is
+         * touched, and a database that has never failed a delivery simply has none of these.
+         */
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS unsent_webhooks (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "event TEXT NOT NULL, " +
+                        "listTitle TEXT NOT NULL, " +
+                        "itemCount INTEGER NOT NULL, " +
+                        "payload TEXT NOT NULL, " +
+                        "failedAt INTEGER NOT NULL, " +
+                        "reason TEXT NOT NULL)"
+                )
+            }
+        }
+
+        /**
+         * V8 moves a review decision off the List row and onto the file it is about.
+         *
+         * Three steps, in one transaction, and the order matters. Items first learn their own
+         * root-relative path — the identity a decision is stored against — computed from the
+         * folder their list is linked to. Every decision already recorded then moves across to
+         * that identity, so nothing a user has reviewed is lost. Finally the old columns are
+         * cleared on source-backed rows, because leaving them populated would leave a second,
+         * silently diverging answer to "is this checked" on disk.
+         *
+         * Manual items are untouched throughout: they have no file, they keep their columns, and
+         * the WHERE clauses here all require a source path.
+         *
+         * Non-overlap means one file can appear in at most one list, so the copy across cannot
+         * meet the same file twice. MAX() is used anyway — if a database from some earlier state
+         * did hold a duplicate, taking "reviewed" over "not reviewed" loses nothing, whereas
+         * failing the migration would lose the whole database.
+         */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE list_items ADD COLUMN rootRelativePath TEXT")
+                connection.execSQL(
+                    "UPDATE list_items SET rootRelativePath = (" +
+                        "SELECT CASE WHEN l.sourceRelativePath IS NULL OR l.sourceRelativePath = ''" +
+                        " THEN list_items.sourceRelativePath" +
+                        " ELSE l.sourceRelativePath || '/' || list_items.sourceRelativePath END" +
+                        " FROM lists l WHERE l.id = list_items.listId" +
+                        ") WHERE sourceRelativePath IS NOT NULL"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_list_items_rootRelativePath " +
+                        "ON list_items (rootRelativePath)"
+                )
+
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS file_review_state (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "rootUri TEXT NOT NULL, " +
+                        "relativePath TEXT NOT NULL, " +
+                        "isCompleted INTEGER NOT NULL DEFAULT 0, " +
+                        "isFavorite INTEGER NOT NULL DEFAULT 0, " +
+                        "custom1 INTEGER NOT NULL DEFAULT 0, " +
+                        "custom2 INTEGER NOT NULL DEFAULT 0, " +
+                        "sourceMissing INTEGER NOT NULL DEFAULT 0, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_file_review_state_rootUri_relativePath " +
+                        "ON file_review_state (rootUri, relativePath)"
+                )
+
+                connection.execSQL(
+                    "INSERT OR IGNORE INTO file_review_state (" +
+                        "rootUri, relativePath, isCompleted, isFavorite, custom1, custom2, " +
+                        "sourceMissing, updatedAt" +
+                        ") SELECT l.sourceRootUri, i.rootRelativePath, " +
+                        "MAX(i.isCompleted), MAX(i.isFavorite), MAX(i.custom1), MAX(i.custom2), " +
+                        "MIN(i.sourceMissing), 0 " +
+                        "FROM list_items i JOIN lists l ON l.id = i.listId " +
+                        "WHERE l.sourceRootUri IS NOT NULL AND i.rootRelativePath IS NOT NULL " +
+                        "GROUP BY l.sourceRootUri, i.rootRelativePath"
+                )
+
+                connection.execSQL(
+                    "UPDATE list_items SET isCompleted = 0, isFavorite = 0, custom1 = 0, custom2 = 0 " +
+                        "WHERE rootRelativePath IS NOT NULL"
+                )
+            }
+        }
+
+        /**
+         * V9 caches each source file's size and modified time on its item row.
+         *
+         * Purely additive and nullable, so every existing item survives as "not measured yet" —
+         * which the filter and the sort already know how to treat, and which any scan of the
+         * linked folder fills in. Nothing is backfilled here: this migration has no folder to
+         * read, and inventing a zero would be worse than admitting an absence.
+         */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE list_items ADD COLUMN sourceSizeBytes INTEGER")
+                connection.execSQL("ALTER TABLE list_items ADD COLUMN sourceModifiedAt INTEGER")
+            }
+        }
+
         @Volatile
         private var instance: ListeaDatabase? = null
 
@@ -92,7 +203,10 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_2_3,
                     MIGRATION_3_4,
                     MIGRATION_4_5,
-                    MIGRATION_5_6
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                    MIGRATION_7_8,
+                    MIGRATION_8_9
                 )
                     .build()
                     .also { instance = it }

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -68,7 +69,7 @@ import me.ashikoki.listea.data.FolderDiff
 import me.ashikoki.listea.data.ItemAction
 import me.ashikoki.listea.data.ListDetail
 import me.ashikoki.listea.data.ListEntity
-import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.ReviewItem
 
 @Composable
 fun ListDetailScreen(
@@ -81,9 +82,20 @@ fun ListDetailScreen(
     val detailFlow = remember(listId) { viewModel.observeDetail(listId) }
     val detail by detailFlow.collectAsStateWithLifecycle(initialValue = null)
     var newItem by remember { mutableStateOf("") }
-    var editing by remember { mutableStateOf<ListItemEntity?>(null) }
+    // Held out here, above every early return, rather than left to the LazyColumn to remember.
+    // Opening an item replaces this whole page with the viewer, so a state created down inside
+    // the list would leave the composition with it and the user would come back to the top of a
+    // list they had scrolled a long way down.
+    val itemsScroll = rememberLazyListState()
+    // Which item is being looked at, if any. An id rather than the item itself, so the viewer
+    // keeps following the same row as the list around it is re-read.
+    var viewingItemId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var sortOpen by remember { mutableStateOf(false) }
+    var filterOpen by remember { mutableStateOf(false) }
 
-    BackHandler { onBack() }
+    // The viewer owns Back while it is up, and says so explicitly rather than relying on which
+    // handler happened to be registered last.
+    BackHandler(enabled = viewingItemId == null) { onBack() }
 
     // One check per page entry, plus one whenever the app returns to the foreground while this
     // page is the one on screen: another app (a file manager, FolderSync, ...) may have added or
@@ -106,6 +118,12 @@ fun ListDetailScreen(
 
     val freshness by viewModel.sourceFreshness.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val arrangements by viewModel.arrangements.collectAsStateWithLifecycle()
+
+    // The same two sources the Folder browser reads, under this list's own key, so "same filter
+    // and sort everywhere" really does mean everywhere and a list is not a third place to set it.
+    val arrangementKey = listArrangementKey(listId)
+    val arrangement = resolveArrangement(arrangements, arrangementKey, settings.sharedFileArrangement)
 
     val current = detail
     if (current == null) {
@@ -119,6 +137,36 @@ fun ListDetailScreen(
                 CircularProgressIndicator()
             }
         }
+        return
+    }
+
+    // What the filter and the sort leave on screen. Re-derived whenever the items, the
+    // arrangement or any checked state changes — all three arrive here as a new input rather than
+    // as something to invalidate by hand, which is what makes checking an item off move it
+    // straight into its new group.
+    //
+    // Deliberately not used for anything but display and the queue a Review walks. The counts
+    // above, the progress bar and the completion this list reports all read `current` — see the
+    // second rule at the top of ReviewArrange.kt.
+    val shownItems = remember(current.items, arrangement) {
+        arrangeFiles(current.items, arrangement, System.currentTimeMillis(), ::reviewFacts)
+    }
+
+    // Opened over the page rather than beside it: the viewer is the whole screen, and returning
+    // from it has to land on the same list, scrolled where it was.
+    viewingItemId?.let { openedId ->
+        ListItemViewerScreen(
+            modifier = modifier,
+            // The items the page is showing, in the order it shows them, so paging through the
+            // viewer and scrolling the page walk the same sequence. A filtered page pages its
+            // subset: the viewer opened from a row that is on screen, and reaching one that is
+            // not by swiping would be the filter failing to mean anything.
+            items = shownItems,
+            initialItemId = openedId,
+            listTitle = current.list.title,
+            settings = settings,
+            onClose = { viewingItemId = null }
+        )
         return
     }
 
@@ -148,6 +196,7 @@ fun ListDetailScreen(
         // down instead of squeezing them into a fixed viewport, and the add-item row sits at the
         // end of what it adds to rather than permanently reserving the bottom of the screen.
         LazyColumn(
+            state = itemsScroll,
             modifier = bodyModifier.fillMaxSize(),
             contentPadding = PaddingValues(
                 horizontal = ListeaDimens.PagePadding,
@@ -192,23 +241,42 @@ fun ListDetailScreen(
             // 3. Items — ListItems only. A folder-backed list holds its source files, however
             // deep they sit; the folders they came from are not items and never appear here.
             item {
-                SectionHeader("Items")
+                // The header keeps the list's whole item count behind it: the controls that
+                // decide what is shown must not themselves disappear when the filter they set
+                // happens to match nothing.
+                ArrangeableSectionHeader(
+                    title = "Items",
+                    arrangement = arrangement,
+                    onSort = { sortOpen = true },
+                    onFilter = { filterOpen = true },
+                    noun = "items"
+                )
+                if (!arrangement.isFilterDefault) {
+                    FilterSummary(
+                        shown = shownItems.size,
+                        total = current.items.size,
+                        noun = "item"
+                    )
+                }
                 Spacer(Modifier.height(ListeaDimens.CompactGap))
                 HorizontalDivider()
             }
-            if (current.items.isEmpty()) {
+            if (shownItems.isEmpty()) {
                 item {
                     Spacer(Modifier.height(ListeaDimens.RowGap))
-                    Text("No items yet", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (current.items.isEmpty()) "No items yet" else "No items match the filter",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                 }
             } else {
-                items(current.items, key = { it.id }) { item ->
+                items(shownItems, key = { it.id }) { item ->
                     ItemRow(
                         item = item,
                         settings = settings,
                         onToggle = { viewModel.setItemCompleted(item, it) },
-                        onEdit = { editing = item },
-                        onDelete = { viewModel.deleteItem(item) }
+                        onOpen = { viewingItemId = item.id },
+                        onDelete = { item.rowId?.let { viewModel.deleteItem(listId, it) } }
                     )
                     HorizontalDivider()
                 }
@@ -240,14 +308,31 @@ fun ListDetailScreen(
         }
     }
 
-    editing?.let { target ->
-        TextPromptDialog(
-            title = "Edit item",
-            label = "Item text",
-            initialText = target.title,
-            confirmLabel = "Save",
-            onConfirm = { viewModel.renameItem(target.id, it); editing = null },
-            onDismiss = { editing = null }
+    fun applyArrangement(updated: FileArrangement) {
+        viewModel.setArrangement(arrangementKey, updated)
+        sortOpen = false
+        filterOpen = false
+    }
+
+    // Both groups are always offered here, unlike on the Folder screen where they follow the
+    // review integration switch. A List has had checkboxes since before any of this existed, so
+    // filtering and sorting on them can never be a control with invisible consequences.
+    if (sortOpen) {
+        FileSortDialog(
+            arrangement = arrangement,
+            showCheckedSort = true,
+            onDismiss = { sortOpen = false },
+            onApply = ::applyArrangement,
+            noun = "items"
+        )
+    }
+    if (filterOpen) {
+        FileFilterDialog(
+            arrangement = arrangement,
+            showCheckedGroup = true,
+            onDismiss = { filterOpen = false },
+            onApply = ::applyArrangement,
+            noun = "items"
         )
     }
 
@@ -600,36 +685,42 @@ private fun WebhookSection(
 }
 
 /**
- * One item: check it, read what it is, or remove it. Editing is a tap on the text.
+ * One item: check it, look at it, or remove it. Opening it is a tap on the text.
+ *
+ * The tap used to open a rename box and now opens the item itself — see [ListItemViewerScreen]
+ * for why renaming a folder-backed item was never really an edit. The tappable area is the text
+ * column alone, so the checkbox and the delete button keep their own meanings and a tap aimed at
+ * either cannot fall through to opening the viewer.
  *
  * The tags are read-only here — actions are set in Review — and carry whatever names Settings
  * currently gives them, which is why [settings] is passed in rather than the labels.
  */
 @Composable
 private fun ItemRow(
-    item: ListItemEntity,
+    item: ReviewItem,
     settings: AppSettings,
     onToggle: (Boolean) -> Unit,
-    onEdit: () -> Unit,
+    onOpen: () -> Unit,
     onDelete: () -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Checkbox(checked = item.isCompleted, onCheckedChange = onToggle)
+        Checkbox(checked = item.decisions.isCompleted, onCheckedChange = onToggle)
         Column(
             modifier = Modifier
                 .weight(1f)
-                .clickable(onClick = onEdit)
+                .clickable(onClick = onOpen)
                 .padding(vertical = ListeaDimens.RowGap),
             verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
         ) {
             Text(
                 text = item.title,
                 style = MaterialTheme.typography.bodyMedium,
-                textDecoration = if (item.isCompleted) TextDecoration.LineThrough else null,
-                color = if (item.isCompleted) {
+                textDecoration =
+                    if (item.decisions.isCompleted) TextDecoration.LineThrough else null,
+                color = if (item.decisions.isCompleted) {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 } else {
                     MaterialTheme.colorScheme.onSurface
@@ -639,7 +730,7 @@ private fun ItemRow(
             )
             // Folder-backed items keep their path so bilibili/a.jpg stays distinct from
             // danbooru/a.jpg.
-            item.sourceRelativePath?.takeIf { it != item.title }?.let { path ->
+            item.relativePath?.takeIf { it != item.title }?.let { path ->
                 StatusLine(path)
             }
             ItemActionTags(item, settings)
@@ -674,8 +765,8 @@ private fun ItemRow(
  * Emits nothing at all for an item with no actions set, so an untagged list stays quiet.
  */
 @Composable
-private fun ItemActionTags(item: ListItemEntity, settings: AppSettings) {
-    val tags = ItemAction.entries.filter { it.isSetOn(item) }
+private fun ItemActionTags(item: ReviewItem, settings: AppSettings) {
+    val tags = ItemAction.entries.filter { it.isSetOn(item.decisions) }
     if (tags.isEmpty()) return
 
     Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {

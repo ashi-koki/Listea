@@ -66,6 +66,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.ashikoki.listea.ui.theme.ListeaTheme
@@ -105,6 +106,7 @@ fun ListeaApp(
         mutableStateOf<QuickReviewTarget?>(null)
     }
     var viewingFileUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var unsentHistoryOpen by rememberSaveable { mutableStateOf(false) }
 
     // Which folder the browser is standing in, owned here rather than by FolderScreen itself.
     // FolderScreen is composed only while Folder is the selected destination, so anything it
@@ -116,7 +118,7 @@ fun ListeaApp(
     }
 
     val nested = openListId != null || reviewListId != null ||
-        quickReview != null || viewingFileUri != null
+        quickReview != null || viewingFileUri != null || unsentHistoryOpen
 
     // Android convention for a bottom bar: back from a secondary destination returns to the first
     // one rather than leaving the app. Disabled while nested, so the nested screens keep their own.
@@ -166,7 +168,9 @@ fun ListeaApp(
 
                 TopLevelDestination.Settings -> SettingsScreen(
                     modifier = contentModifier,
-                    viewModel = listsViewModel
+                    viewModel = listsViewModel,
+                    historyOpen = unsentHistoryOpen,
+                    onHistoryOpenChange = { unsentHistoryOpen = it }
                 )
             }
         }
@@ -199,12 +203,14 @@ private fun WebhookNoticeDialog(viewModel: ListsViewModel) {
                 Text(
                     current.outcomeLabel,
                     style = MaterialTheme.typography.bodyMedium,
-                    // A switched-off webhook is information, not a failure: it gets neither the
-                    // success tint nor the alarm of a delivery that actually went wrong.
+                    // A switched-off webhook, or one with nothing to carry, is information
+                    // rather than failure: neither gets the success tint, nor the alarm of a
+                    // delivery that actually went wrong.
                     color = when (current.outcome) {
                         NoticeOutcome.SENT -> MaterialTheme.colorScheme.primary
                         NoticeOutcome.FAILED -> MaterialTheme.colorScheme.error
-                        NoticeOutcome.DISABLED -> MaterialTheme.colorScheme.onSurfaceVariant
+                        NoticeOutcome.DISABLED,
+                        NoticeOutcome.EMPTY -> MaterialTheme.colorScheme.onSurfaceVariant
                     }
                 )
                 Spacer(Modifier.height(ListeaDimens.RowGap))
@@ -239,8 +245,8 @@ private val DirStackSaver = listSaver<List<DirRef>, String>(
 
 /** Same idea for an open Quick Review: rotating should not throw the user out of it. */
 private val QuickReviewTargetSaver = listSaver<QuickReviewTarget?, Any>(
-    save = { target -> target?.let { listOf(it.listId, it.folderPath) }.orEmpty() },
-    restore = { saved -> QuickReviewTarget(saved[0] as Long, saved[1] as String) }
+    save = { target -> target?.let { listOf(it.rootUri, it.folderPath) }.orEmpty() },
+    restore = { saved -> QuickReviewTarget(saved[0] as String, saved[1] as String) }
 )
 
 /** Holds the in-flight folder read, so a newer navigation can replace it. */
@@ -273,6 +279,7 @@ fun FolderScreen(
     val store = remember { FolderStore(context) }
     val folderListRequest by listsViewModel.folderListRequest.collectAsStateWithLifecycle()
     val settings by listsViewModel.settings.collectAsStateWithLifecycle()
+    val arrangements by listsViewModel.arrangements.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val load = remember { LoadJob() }
     var state by remember { mutableStateOf<FolderUiState>(FolderUiState.Loading) }
@@ -341,7 +348,6 @@ fun FolderScreen(
     // Quick Review and the file viewer are still drawn here, so the browsing stack survives and
     // exiting lands back on the same folder. Only their on/off state is owned by the shell, which
     // needs it to hide the bottom navigation.
-    val quickReviewRequest by listsViewModel.quickReviewRequest.collectAsStateWithLifecycle()
 
     // Another app (FolderSync, a file manager, ...) may change the folder while we are backgrounded,
     // so re-read the directory on screen whenever we come back to the foreground. A load started by
@@ -353,28 +359,99 @@ fun FolderScreen(
         }
     }
 
+    // Quick Review edits the same files this listing describes, and can leave them checked,
+    // deleted or moved. Coming back re-reads the folder so the rows — and anything the filter is
+    // deciding from them — describe what is there now rather than what was there on the way in.
+    // Checked state alone would have kept itself current through its own database flow; existence
+    // would not have.
+    var wasQuickReviewing by remember { mutableStateOf(false) }
+    LaunchedEffect(quickReview) {
+        val returned = wasQuickReviewing && quickReview == null
+        wasQuickReviewing = quickReview != null
+        if (returned) (state as? FolderUiState.Browsing)?.let { open(it.stack, quiet = true) }
+    }
+
     val browsing = state as? FolderUiState.Browsing
     val herePath = browsing?.let { relativePathOf(it.stack) }
 
-    // Where the source check sends the user. Entering is refused for a folder the user has since
-    // navigated away from, so a slow scan cannot drop them into a queue they did not ask for.
-    LaunchedEffect(quickReviewRequest, herePath) {
-        when (val request = quickReviewRequest) {
-            is QuickReviewRequest.Ready -> {
-                if (request.folderPath == herePath) {
-                    onQuickReviewChange(QuickReviewTarget(request.listId, request.folderPath))
-                }
-                listsViewModel.dismissQuickReviewRequest()
-            }
+    // ---------------------------------------------------------------------------------------
+    // What the Files section is showing, derived once for the whole screen.
+    //
+    // Hoisted above the nested screens rather than left in the Browsing branch below, because
+    // the file viewer is one of those nested screens and pages exactly this subset: tapping the
+    // third of eight filtered pictures has to swipe through those eight and not through the
+    // forty files the folder happens to hold. The branch below reuses these rather than deriving
+    // a second, quietly different answer to the same question.
+    //
+    // All of it tolerates there being no folder open, because this runs before the state is
+    // narrowed: with no folder there are no files, and nothing below it is ever consulted.
+    // ---------------------------------------------------------------------------------------
+    val rootUri = browsing?.stack?.first()?.uri?.toString()
+    val ownershipFlow = remember(rootUri) {
+        rootUri?.let { listsViewModel.observeFolderOwnership(it) } ?: flowOf(FolderOwnership())
+    }
+    val ownership by ownershipFlow.collectAsStateWithLifecycle(initialValue = FolderOwnership())
+    val here = herePath.orEmpty()
+    val quickReviewEnabled = settings.folderQuickReviewEnabled
 
-            // Stale or unreadable source: the owning list's page explains it and offers the
-            // update. No reconcile dialog is opened on the user's behalf.
-            is QuickReviewRequest.OpenList -> {
-                onOpenList(request.listId)
-                listsViewModel.dismissQuickReviewRequest()
-            }
+    // Split once per listing rather than per row, so the two sections below can be headed
+    // separately without testing isDirectory on every item.
+    val entries = browsing?.contents?.entries.orEmpty()
+    val directories = remember(entries) { entries.filter { it.isDirectory } }
+    val files = remember(entries) { entries.filterNot { it.isDirectory } }
 
-            else -> Unit
+    // A file's checked state comes from whichever list owns the folder it sits in, direct or
+    // inherited. Resolved once here rather than per row, because the filter and the sort need it
+    // as much as the tick does.
+    val owner = owningScope(folderListStatus(ownership, here))
+
+    /**
+     * What a row's tick shows, or null for no tick at all.
+     *
+     * The file's own state first, so a file reviewed in a folder no List covers still shows its
+     * tick. Falling back to list membership keeps a member that has never been reviewed showing
+     * an empty tick rather than none. Null when nothing anywhere holds an opinion, because an
+     * empty tick on every file of an uncovered folder would claim a review relationship that
+     * does not exist.
+     */
+    fun shownCheckState(entry: FolderEntry): Boolean? {
+        if (!quickReviewEnabled) return null
+        val path = childRelativePath(here, entry.name)
+        return ownership.fileCompletion[path]
+            ?: owner?.let { ownership.itemCompletion[it.id to path] }
+    }
+
+    /**
+     * What the filter and the sort read, which is not quite the same question.
+     *
+     * "Nothing recorded" is not an opinion worth drawing a tick for, but it is a perfectly good
+     * answer to "is this checked?" — no. Collapsing it to false here rather than in
+     * [shownCheckState] is what lets Unchecked mean every file still to be looked at, rather than
+     * only the ones some list already knows about.
+     */
+    fun sortableCheckState(entry: FolderEntry): Boolean? =
+        if (!quickReviewEnabled) null else shownCheckState(entry) ?: false
+
+    // With no root the key names nothing, which costs nothing: there are no files to arrange, and
+    // the shared mode does not consult it at all.
+    val arrangement = resolveArrangement(
+        arrangements,
+        folderArrangementKey(rootUri.orEmpty(), here),
+        settings.sharedFileArrangement
+    )
+
+    // Re-derived whenever the listing, the arrangement or any checked state changes, which is
+    // exactly what makes this survive a refresh: a file deleted outside the app leaves the
+    // listing and a file checked in Quick Review changes group, and both arrive here as a new
+    // input rather than as something to invalidate by hand.
+    val shownFiles = remember(files, arrangement, ownership, here, quickReviewEnabled, owner) {
+        arrangeFiles(files, arrangement, System.currentTimeMillis()) { entry ->
+            FileFacts(
+                name = entry.name,
+                sizeBytes = entry.sizeBytes,
+                lastModified = entry.lastModified,
+                isChecked = sortableCheckState(entry)
+            )
         }
     }
 
@@ -400,13 +477,12 @@ fun FolderScreen(
     // Like Quick Review, hosted inside this screen so closing returns to the same folder.
     // Resolved against the current listing, so a rotation reopens the same file once the folder
     // has been read again.
-    val folderFiles = browsing?.contents?.entries.orEmpty().filterNot { it.isDirectory }
-    val openFile = viewingFileUri?.let { uri -> folderFiles.firstOrNull { it.uri.toString() == uri } }
+    val openFile = viewingFileUri?.let { uri -> shownFiles.firstOrNull { it.uri.toString() == uri } }
 
     // A file can be deleted by another app between opening it and the folder being re-read. Give
     // the viewer up rather than leave the shell believing a nested screen is still open, which
     // would strip the bottom navigation off a folder page that has no way back.
-    LaunchedEffect(viewingFileUri, folderFiles) {
+    LaunchedEffect(viewingFileUri, shownFiles) {
         if (viewingFileUri != null && browsing != null && openFile == null) {
             onViewFileChange(null)
         }
@@ -415,9 +491,11 @@ fun FolderScreen(
     if (openFile != null) {
         FileViewerScreen(
             modifier = modifier,
-            // Every file of the folder it was opened from, in the order shown, so paging matches
-            // the browser. Directories are not files to page through.
-            files = folderFiles,
+            // Exactly what the browser is showing, in the order it shows it, so a swipe reaches
+            // the next row on the page. A filter left on means eight pictures to page through,
+            // not forty files with thirty-two of them hidden on the page behind. Directories are
+            // not files to page through either way.
+            files = shownFiles,
             initial = openFile,
             // Where these files sit, for the Info sheet. The viewer shows one folder's direct
             // files, so this is the same path for every card in it.
@@ -460,14 +538,11 @@ fun FolderScreen(
             }
 
             is FolderUiState.Browsing -> {
-                val rootUri = current.stack.first().uri.toString()
-                val ownershipFlow = remember(rootUri) {
-                    listsViewModel.observeFolderOwnership(rootUri)
-                }
-                val ownership by ownershipFlow
-                    .collectAsStateWithLifecycle(initialValue = FolderOwnership())
-                val here = relativePathOf(current.stack)
-                val quickReviewEnabled = settings.folderQuickReviewEnabled
+                // Non-null here, unlike the hoisted `rootUri` above, which has to survive the
+                // states in which no folder is open at all. Everything else this branch needs —
+                // the ownership, the arrangement, the files and the subset shown — is hoisted,
+                // because the file viewer above pages that same subset.
+                val root = current.stack.first().uri.toString()
 
                 // Ownership for the current folder and every visible directory, derived once per
                 // data change rather than per card recomposition, from one indexed lookup each.
@@ -486,21 +561,16 @@ fun FolderScreen(
 
                 fun requestList(path: String, folderUri: Uri, folderName: String) {
                     listsViewModel.requestListForFolder(
-                        rootUri = rootUri,
+                        rootUri = root,
                         relativePath = path,
                         folderUri = folderUri,
                         folderName = folderName
                     )
                 }
 
-                // Split once per listing rather than per row, so the two sections below can be
-                // headed separately without testing isDirectory on every item.
-                val directories = remember(current.contents.entries) {
-                    current.contents.entries.filter { it.isDirectory }
-                }
-                val files = remember(current.contents.entries) {
-                    current.contents.entries.filterNot { it.isDirectory }
-                }
+                val folderKey = folderArrangementKey(root, here)
+                var sortOpen by remember { mutableStateOf(false) }
+                var filterOpen by remember { mutableStateOf(false) }
 
                 // One scroll surface for the page. The breadcrumb, the folder summary and the
                 // action row scroll away with everything else rather than pinning most of the
@@ -525,14 +595,15 @@ fun FolderScreen(
                             entries = current.contents.entries,
                             status = statusOf(here),
                             quickReviewEnabled = quickReviewEnabled,
-                            checkingSource = quickReviewRequest is QuickReviewRequest.Checking,
                             onRefresh = { open(current.stack) },
                             onOpenList = onOpenList,
                             onCreateList = {
                                 requestList(here, current.stack.last().uri, current.stack.last().name)
                             },
-                            onQuickReview = { listId ->
-                                listsViewModel.requestQuickReview(listId, here)
+                            // Straight in. No list is consulted, so there is nothing to
+                            // check and nothing to be stale: the folder is the source.
+                            onQuickReview = {
+                                onQuickReviewChange(QuickReviewTarget(root, here))
                             }
                         )
                     }
@@ -568,28 +639,55 @@ fun FolderScreen(
 
                     if (files.isNotEmpty()) {
                         item {
-                            SectionHeader(
-                                "Files",
-                                Modifier.padding(top = ListeaDimens.RowGap)
+                            // The header keeps the folder's whole file count behind it: the
+                            // controls that decide what is shown must not themselves disappear
+                            // when the filter they set happens to match nothing.
+                            ArrangeableSectionHeader(
+                                title = "Files",
+                                arrangement = arrangement,
+                                onSort = { sortOpen = true },
+                                onFilter = { filterOpen = true },
+                                modifier = Modifier.padding(top = ListeaDimens.RowGap)
                             )
+                            if (!arrangement.isFilterDefault) {
+                                FilterSummary(shown = shownFiles.size, total = files.size)
+                            }
                         }
-                        // A file's checked state comes from whichever list owns the folder it
-                        // sits in, direct or inherited — and is hidden entirely when Folder
-                        // review integration is switched off, which changes what is shown and
-                        // nothing that is stored.
-                        val owner = owningScope(statusOf(here)).takeIf { quickReviewEnabled }
-                        items(files, key = { it.uri }) { entry ->
+                        items(shownFiles, key = { it.uri }) { entry ->
                             FileRow(
                                 entry = entry,
-                                isChecked = owner?.let {
-                                    ownership.itemCompletion[
-                                        it.id to childRelativePath(here, entry.name)
-                                    ]
-                                },
+                                // Hidden entirely while Folder review integration is off, which
+                                // changes what is shown and nothing that is stored.
+                                isChecked = shownCheckState(entry),
                                 onOpen = { onViewFileChange(entry.uri.toString()) }
                             )
                         }
                     }
+                }
+
+                fun applyArrangement(updated: FileArrangement) {
+                    listsViewModel.setArrangement(folderKey, updated)
+                    sortOpen = false
+                    filterOpen = false
+                }
+
+                if (sortOpen) {
+                    FileSortDialog(
+                        arrangement = arrangement,
+                        // Sorting by something the page is not showing would be an order with no
+                        // visible reason for being what it is.
+                        showCheckedSort = quickReviewEnabled,
+                        onDismiss = { sortOpen = false },
+                        onApply = ::applyArrangement
+                    )
+                }
+                if (filterOpen) {
+                    FileFilterDialog(
+                        arrangement = arrangement,
+                        showCheckedGroup = quickReviewEnabled,
+                        onDismiss = { filterOpen = false },
+                        onApply = ::applyArrangement
+                    )
                 }
             }
         }
@@ -716,11 +814,10 @@ private fun CurrentFolderCard(
     entries: List<FolderEntry>,
     status: FolderListStatus,
     quickReviewEnabled: Boolean,
-    checkingSource: Boolean,
     onRefresh: () -> Unit,
     onOpenList: (Long) -> Unit,
     onCreateList: () -> Unit,
-    onQuickReview: (Long) -> Unit
+    onQuickReview: () -> Unit
 ) {
     val owner = owningScope(status)
 
@@ -752,15 +849,14 @@ private fun CurrentFolderCard(
             },
             actions = {
                 FolderAction("Refresh", Icons.Filled.Refresh, onClick = onRefresh)
-                // Subject to the Folder integration setting and to the freshness gate, which is
-                // what "Checking source" is: the action stays in place and simply cannot be
-                // pressed again until the check has answered.
-                if (owner != null && quickReviewAvailable(status, quickReviewEnabled)) {
+                // Offered on every folder now, subject only to the Folder integration setting.
+                // It reviews this folder's own files, so whether any List covers them — and
+                // whether that List is up to date — has stopped being a precondition.
+                if (quickReviewAvailable(quickReviewEnabled)) {
                     FolderAction(
-                        label = if (checkingSource) "Checking…" else "Quick Review",
+                        label = "Quick Review",
                         icon = Icons.Filled.Visibility,
-                        enabled = !checkingSource,
-                        onClick = { onQuickReview(owner.id) }
+                        onClick = onQuickReview
                     )
                 }
                 owner?.let { scope ->
@@ -875,8 +971,8 @@ private fun FolderCard(
 /**
  * A file row. Tapping it only ever opens the file for viewing: no checking, no actions, no
  * workflow. The checked state is shown when the owning list tracks the file, but it is reporting,
- * not a control. [isChecked] is null when no list covers this folder, when the file is not part
- * of the owning list's snapshot, or when Folder review integration is switched off.
+ * not a control. [isChecked] is null when nothing is known about the file — never reviewed and
+ * in no list — or when Folder review integration is switched off.
  */
 @Composable
 private fun FileRow(entry: FolderEntry, isChecked: Boolean?, onOpen: () -> Unit) {
@@ -934,9 +1030,6 @@ private fun folderCountsLabel(entries: List<FolderEntry>): String {
         if (bytes > 0) add(formatSize(bytes))
     }.joinToString(" · ")
 }
-
-private fun countLabel(count: Int, noun: String): String =
-    "$count $noun" + if (count == 1) "" else "s"
 
 /** "JPG · 4.2 MB · 2026-07-11 14:22". Type first, because it is what identifies the file. */
 private fun fileDetail(entry: FolderEntry): String = buildList {

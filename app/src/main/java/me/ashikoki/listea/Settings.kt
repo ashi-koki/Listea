@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import me.ashikoki.listea.data.ItemAction
+import me.ashikoki.listea.data.ReviewDecisions
 import me.ashikoki.listea.data.ListItemEntity
 
 /**
@@ -57,7 +58,72 @@ data class AppSettings(
      * asked for. With it off a list reports [SourceFreshness.NotChecked] rather than an
      * up-to-date verdict nothing has established.
      */
-    val autoCheckSourceFreshness: Boolean = true
+    val autoCheckSourceFreshness: Boolean = true,
+
+    /**
+     * Whether finishing a Quick Review queue delivers a webhook of its own.
+     *
+     * Quick Review has no webhook configuration of its own and is not going to get one: it is
+     * folder-scoped and temporary, so it posts to [defaultWebhookUrl] as it stands right now.
+     * This switch is the whole gate — [defaultWebhookEnabled] is only a template for new lists
+     * and has no say here — and an empty default URL is reported exactly like any other unusable
+     * one rather than passing silently.
+     *
+     * Off by default, which is the behaviour Quick Review has always had: it edits the owning
+     * list's real items, so a list that *completes* during a Quick Review still fires that list's
+     * own `list.completed` webhook either way.
+     */
+    val quickReviewWebhookEnabled: Boolean = false,
+
+    /**
+     * Whether a payload carries only the items that are checked.
+     *
+     * Global: it applies to every event, the test webhook included, so what the test button sends
+     * is still what a real delivery would send. Off is the long-standing behaviour, where a
+     * receiver sees every item and decides for itself using `isCompleted`.
+     *
+     * Nothing is filtered out of a *review*, only out of what is sent. Pair it with
+     * [reviewUncheckedOnly] to deliver just the decisions of one round.
+     */
+    val webhookCompletedItemsOnly: Boolean = false,
+
+    /**
+     * Whether entering a review queues only the items that are not checked yet.
+     *
+     * The queue is fixed when the review opens, not re-evaluated as items are checked: an item
+     * checked mid-review stays in front of the user and stays swipeable backwards. Leaving and
+     * re-entering is what starts a new round.
+     *
+     * Off is the long-standing behaviour, where a review walks everything it is given.
+     */
+    val reviewUncheckedOnly: Boolean = false,
+
+    /**
+     * Whether one filter and one sort order are shared by every folder and every list, or each
+     * of them keeps its own.
+     *
+     * On by default, which is the answer that matches what setting a filter usually means: a user
+     * who asks for "videos, newest first" is describing how they want to browse, not how they
+     * want to browse *this* folder. Off is the richer behaviour and costs a per-folder memory,
+     * which is why it is the one you opt into.
+     *
+     * Switching it never discards anything. Both the shared arrangement and the per-listing ones
+     * are kept whichever way it is set, so turning it on to sweep through a root and turning it
+     * back off returns every folder and list to what it had — see [FolderArrangements].
+     */
+    val sharedFileArrangement: Boolean = true,
+
+    /**
+     * Whether leaving a review delivers a webhook for the queue that was just reviewed.
+     *
+     * Full Review uses the list's own webhook configuration, exactly as its completion does;
+     * Quick Review uses [defaultWebhookUrl] and is additionally gated on
+     * [quickReviewWebhookEnabled], because that switch is what makes Quick Review send anything
+     * at all. Either way the payload covers the review's own queue, not the whole list.
+     *
+     * A queue that finished on screen has already sent, and is not sent again on the way out.
+     */
+    val webhookOnReviewExit: Boolean = false
 ) {
     /**
      * What the user sees this action called. Favourite is not configurable in V3.8, so it answers
@@ -82,18 +148,18 @@ data class AppSettings(
 }
 
 /**
- * The enabled actions of [item] as wire values, in [ItemAction] order.
+ * The enabled actions in [decisions] as wire values, in [ItemAction] order.
  *
  * Duplicates are collapsed rather than rejected: two slots configured with the same wire value is
  * a strange thing to do but not a dangerous one, and emitting `["tag","tag"]` would be worse for
  * a receiver than emitting it once. Order stays fixed either way.
  */
-fun itemActionNames(item: ListItemEntity, settings: AppSettings): List<String> =
-    ItemAction.entries.filter { it.isSetOn(item) }.map { settings.wireOf(it) }.distinct()
+fun itemActionNames(decisions: ReviewDecisions, settings: AppSettings): List<String> =
+    ItemAction.entries.filter { it.isSetOn(decisions) }.map { settings.wireOf(it) }.distinct()
 
 /** Compact "★ · Save" summary for a checklist row, or null when the item carries no actions. */
-fun itemActionLabel(item: ListItemEntity, settings: AppSettings): String? =
-    ItemAction.entries.filter { it.isSetOn(item) }
+fun itemActionLabel(decisions: ReviewDecisions, settings: AppSettings): String? =
+    ItemAction.entries.filter { it.isSetOn(decisions) }
         .takeIf { it.isNotEmpty() }
         ?.joinToString(" · ") { settings.labelOf(it) }
 
@@ -132,7 +198,37 @@ class SettingsStore(context: Context) {
                 rememberReviewPosition = prefs[KEY_REMEMBER_POSITION]
                     ?: defaults.rememberReviewPosition,
                 autoCheckSourceFreshness = prefs[KEY_AUTO_CHECK_FRESHNESS]
-                    ?: defaults.autoCheckSourceFreshness
+                    ?: defaults.autoCheckSourceFreshness,
+                quickReviewWebhookEnabled = prefs[KEY_QUICK_REVIEW_WEBHOOK]
+                    ?: defaults.quickReviewWebhookEnabled,
+                webhookCompletedItemsOnly = prefs[KEY_COMPLETED_ITEMS_ONLY]
+                    ?: defaults.webhookCompletedItemsOnly,
+                reviewUncheckedOnly = prefs[KEY_REVIEW_UNCHECKED_ONLY]
+                    ?: defaults.reviewUncheckedOnly,
+                webhookOnReviewExit = prefs[KEY_WEBHOOK_ON_REVIEW_EXIT]
+                    ?: defaults.webhookOnReviewExit,
+                sharedFileArrangement = prefs[KEY_SHARED_ARRANGEMENT]
+                    ?: defaults.sharedFileArrangement
+            )
+        }
+
+    /**
+     * The remembered filters and sort orders, as their own flow rather than as fields on
+     * [AppSettings].
+     *
+     * Kept apart because they are a different kind of thing on a different scale: [settings] is a
+     * handful of switches read by most of the app, and this is a map that grows with the folders
+     * a user has arranged and is read by one screen. Folding them together would re-parse every
+     * remembered folder each time a webhook switch changed.
+     */
+    val arrangements: Flow<FolderArrangements> = dataStore.data
+        .catch { cause -> if (cause is IOException) emit(emptyPreferences()) else throw cause }
+        .map { prefs ->
+            FolderArrangements(
+                global = prefs[KEY_GLOBAL_ARRANGEMENT]?.let(::decodeArrangement)
+                    ?: FileArrangement.Default,
+                byFolder = prefs[KEY_FOLDER_ARRANGEMENTS]?.let(::decodeFolderArrangements)
+                    ?: emptyMap()
             )
         }
 
@@ -164,6 +260,38 @@ class SettingsStore(context: Context) {
     suspend fun setAutoCheckSourceFreshness(enabled: Boolean) =
         put { it[KEY_AUTO_CHECK_FRESHNESS] = enabled }
 
+    suspend fun setQuickReviewWebhookEnabled(enabled: Boolean) =
+        put { it[KEY_QUICK_REVIEW_WEBHOOK] = enabled }
+
+    suspend fun setWebhookCompletedItemsOnly(enabled: Boolean) =
+        put { it[KEY_COMPLETED_ITEMS_ONLY] = enabled }
+
+    suspend fun setReviewUncheckedOnly(enabled: Boolean) =
+        put { it[KEY_REVIEW_UNCHECKED_ONLY] = enabled }
+
+    suspend fun setWebhookOnReviewExit(enabled: Boolean) =
+        put { it[KEY_WEBHOOK_ON_REVIEW_EXIT] = enabled }
+
+    suspend fun setSharedFileArrangement(shared: Boolean) =
+        put { it[KEY_SHARED_ARRANGEMENT] = shared }
+
+    /** The one arrangement every folder uses while [AppSettings.sharedFileArrangement] is on. */
+    suspend fun setGlobalArrangement(arrangement: FileArrangement) =
+        put { it[KEY_GLOBAL_ARRANGEMENT] = encodeArrangement(arrangement) }
+
+    /**
+     * One folder's own arrangement, read-modify-write so the rest of the map is untouched.
+     *
+     * The whole map is rewritten because it is stored as one value; [rememberArrangement] is what
+     * decides what that value becomes, including forgetting a folder that has been put back to
+     * its default and dropping the least recently arranged folder once the cap is reached.
+     */
+    suspend fun setFolderArrangement(folderKey: String, arrangement: FileArrangement) = put { prefs ->
+        val existing = prefs[KEY_FOLDER_ARRANGEMENTS]?.let(::decodeFolderArrangements).orEmpty()
+        prefs[KEY_FOLDER_ARRANGEMENTS] =
+            encodeFolderArrangements(rememberArrangement(existing, folderKey, arrangement))
+    }
+
     private suspend fun put(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         dataStore.edit(block)
     }
@@ -180,5 +308,12 @@ class SettingsStore(context: Context) {
         val KEY_VIDEO_MUTED = booleanPreferencesKey("video_start_muted")
         val KEY_REMEMBER_POSITION = booleanPreferencesKey("remember_review_position")
         val KEY_AUTO_CHECK_FRESHNESS = booleanPreferencesKey("auto_check_source_freshness")
+        val KEY_QUICK_REVIEW_WEBHOOK = booleanPreferencesKey("quick_review_webhook_enabled")
+        val KEY_COMPLETED_ITEMS_ONLY = booleanPreferencesKey("webhook_completed_items_only")
+        val KEY_REVIEW_UNCHECKED_ONLY = booleanPreferencesKey("review_unchecked_only")
+        val KEY_WEBHOOK_ON_REVIEW_EXIT = booleanPreferencesKey("webhook_on_review_exit")
+        val KEY_SHARED_ARRANGEMENT = booleanPreferencesKey("shared_file_arrangement")
+        val KEY_GLOBAL_ARRANGEMENT = stringPreferencesKey("global_file_arrangement")
+        val KEY_FOLDER_ARRANGEMENTS = stringPreferencesKey("folder_file_arrangements")
     }
 }

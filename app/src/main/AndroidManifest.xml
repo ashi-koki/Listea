@@ -14,11 +14,25 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Listea">
+        <!--
+          configChanges: rotation is handled in place rather than by tearing the activity down
+          and building it again. The app is Compose-only, so a size or orientation change is
+          already just a recomposition against the new configuration - what recreation adds is a
+          restart of everything that is *not* Compose state, and on a media screen that is the
+          point of the screen: the ExoPlayer instance goes with the activity, so rotating a
+          playing video used to stop it and start it again from zero, and rotating a photograph
+          threw away the decode and read it back from the provider.
+
+          Deliberately does not list uiMode: switching the system between light and dark should
+          still recreate, because enableEdgeToEdge() picks its system-bar scrims from the theme
+          in onCreate and would otherwise be left holding the old ones.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.Listea"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

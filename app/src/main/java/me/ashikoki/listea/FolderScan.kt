@@ -85,7 +85,13 @@ fun scanFolderFiles(context: Context, folderUri: Uri): List<ScannedFile>? = runC
                 check(path.count { it == '/' } < MAX_DEPTH) { "Folder nesting too deep" }
                 pending.addLast(child to path)
             } else {
-                files += ScannedFile(name = name, relativePath = path, uri = child.uri.toString())
+                files += ScannedFile(
+                    name = name,
+                    relativePath = path,
+                    uri = child.uri.toString(),
+                    sizeBytes = child.length(),
+                    lastModified = child.lastModified().takeIf { it > 0 }
+                )
             }
         }
     }
@@ -94,4 +100,56 @@ fun scanFolderFiles(context: Context, folderUri: Uri): List<ScannedFile>? = runC
         compareBy(String.CASE_INSENSITIVE_ORDER, ScannedFile::relativePath)
             .thenBy(ScannedFile::relativePath)
     )
+}.getOrNull()
+
+/**
+ * What a whole subtree adds up to.
+ *
+ * [folders] counts the directories *below* the folder being measured; the folder itself is not one
+ * of them, so a root holding two subfolders reports two rather than three.
+ */
+data class FolderStats(val folders: Int, val files: Int, val totalBytes: Long) {
+    /** "12 folders · 348 files · 1.4 GB": the one line the Storage card reports. */
+    val summary: String
+        get() = listOf(
+            "$folders folder" + if (folders == 1) "" else "s",
+            "$files file" + if (files == 1) "" else "s",
+            formatSize(totalBytes)
+        ).joinToString(" · ")
+}
+
+/**
+ * Totals for the subtree rooted at [folderUri], walked exactly the way [scanFolderFiles] walks it,
+ * so the numbers the Storage card reports describe the same tree a List would be built from.
+ * Blocking: call on an IO dispatcher.
+ *
+ * Null when the folder cannot be read at all, which the caller says out loud — reporting an
+ * unreadable folder as an empty one would be a lie in the direction that matters.
+ */
+fun scanFolderStats(context: Context, folderUri: Uri): FolderStats? = runCatching {
+    val root = DocumentFile.fromTreeUri(context, folderUri)
+    if (root == null || !root.isDirectory || !root.canRead()) return@runCatching null
+
+    var folders = 0
+    var files = 0
+    var bytes = 0L
+
+    val pending = ArrayDeque<Pair<DocumentFile, Int>>()
+    pending.addLast(root to 0)
+
+    while (pending.isNotEmpty()) {
+        val (directory, depth) = pending.removeLast()
+        for (child in directory.listFiles()) {
+            if (child.isDirectory) {
+                check(depth < MAX_DEPTH) { "Folder nesting too deep" }
+                folders++
+                pending.addLast(child to depth + 1)
+            } else {
+                files++
+                bytes += child.length()
+            }
+        }
+    }
+
+    FolderStats(folders = folders, files = files, totalBytes = bytes)
 }.getOrNull()

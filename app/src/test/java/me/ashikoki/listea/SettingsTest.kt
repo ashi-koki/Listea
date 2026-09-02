@@ -1,7 +1,7 @@
 package me.ashikoki.listea
 
 import me.ashikoki.listea.data.ItemAction
-import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.ReviewDecisions
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -14,16 +14,7 @@ import org.junit.Test
 class SettingsTest {
 
     private fun item(favorite: Boolean = false, custom1: Boolean = false, custom2: Boolean = false) =
-        ListItemEntity(
-            id = 1,
-            listId = 1,
-            title = "a.jpg",
-            sortOrder = 0,
-            createdAt = 0,
-            isFavorite = favorite,
-            custom1 = custom1,
-            custom2 = custom2
-        )
+        ReviewDecisions(isFavorite = favorite, custom1 = custom1, custom2 = custom2)
 
     @Test
     fun `defaults are the factory labels and values`() {
