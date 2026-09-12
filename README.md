@@ -443,8 +443,10 @@ is the only place that can ask Android for the grant.
 Libraries: Room 2.8.2 for persistence, DataStore Preferences for settings, `documentfile` for SAF
 access, Media3 (ExoPlayer) 1.8.0 for video, Coil 3.4.0 for images and animated GIF/WebP.
 
-The only permission is `INTERNET`, used solely for webhook delivery. Folder access is granted by
-you through the system folder picker and is not a runtime permission.
+The permissions are `INTERNET`, used solely for webhook delivery, and `WRITE_EXTERNAL_STORAGE`
+capped at API 28, asked for only the first time you save a file to the gallery album on Android 9
+or below. Folder access is granted by you through the system folder picker and is not a runtime
+permission.
 
 ## Building
 
