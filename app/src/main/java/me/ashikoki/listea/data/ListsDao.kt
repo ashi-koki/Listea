@@ -66,8 +66,8 @@ abstract class ListsDao {
                i.sourceSizeBytes AS sourceSizeBytes,
                i.sourceModifiedAt AS sourceModifiedAt,
                CASE WHEN i.rootRelativePath IS NULL THEN i.isFavorite ELSE COALESCE(s.isFavorite, 0) END AS isFavorite,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.custom1 ELSE COALESCE(s.custom1, 0) END AS custom1,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.custom2 ELSE COALESCE(s.custom2, 0) END AS custom2
+               CASE WHEN i.rootRelativePath IS NULL THEN i.customActions
+                    ELSE COALESCE(s.customActions, '') END AS customActions
         FROM list_items i
         JOIN lists l ON l.id = i.listId
         LEFT JOIN file_review_state s
@@ -320,8 +320,8 @@ abstract class ListsDao {
                i.sourceSizeBytes AS sourceSizeBytes,
                i.sourceModifiedAt AS sourceModifiedAt,
                CASE WHEN i.rootRelativePath IS NULL THEN i.isFavorite ELSE COALESCE(s.isFavorite, 0) END AS isFavorite,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.custom1 ELSE COALESCE(s.custom1, 0) END AS custom1,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.custom2 ELSE COALESCE(s.custom2, 0) END AS custom2
+               CASE WHEN i.rootRelativePath IS NULL THEN i.customActions
+                    ELSE COALESCE(s.customActions, '') END AS customActions
         FROM list_items i
         JOIN lists l ON l.id = i.listId
         LEFT JOIN file_review_state s
@@ -563,12 +563,23 @@ abstract class ListsDao {
      * [refreshCompletion] and returns nothing, so it can never report a completion transition and
      * therefore can never cause a webhook to be delivered.
      */
-    suspend fun setManualItemAction(itemId: Long, action: ItemAction, enabled: Boolean) =
+    @Transaction
+    open suspend fun setManualItemAction(itemId: Long, action: ItemAction, enabled: Boolean) {
         when (action) {
-            ItemAction.FAVORITE -> setItemFavorite(itemId, enabled)
-            ItemAction.CUSTOM1 -> setItemCustom1(itemId, enabled)
-            ItemAction.CUSTOM2 -> setItemCustom2(itemId, enabled)
+            // Its own column, so it is still one write.
+            ItemAction.Favourite -> setItemFavorite(itemId, enabled)
+
+            // The configured actions share a column, so changing one means reading the set,
+            // altering it and writing it back. Inside the transaction, so two actions toggled at
+            // once cannot each write a set that never saw the other.
+            is ItemAction.Custom -> {
+                val current = decodeActionIds(getItemCustomActions(itemId).orEmpty())
+                setItemCustomActions(itemId, encodeActionIds(action.setOn(
+                    ReviewDecisions(customActions = current), enabled
+                ).customActions))
+            }
         }
+    }
 
     /** The same, on a file, so every list holding it sees the action. Still never completes. */
     @Transaction
@@ -605,8 +616,7 @@ abstract class ListsDao {
                     relativePath = relativePath,
                     isCompleted = next.isCompleted,
                     isFavorite = next.isFavorite,
-                    custom1 = next.custom1,
-                    custom2 = next.custom2,
+                    customActions = encodeActionIds(next.customActions),
                     updatedAt = now
                 )
             )
@@ -615,8 +625,7 @@ abstract class ListsDao {
                 id = existing.id,
                 isCompleted = next.isCompleted,
                 isFavorite = next.isFavorite,
-                custom1 = next.custom1,
-                custom2 = next.custom2,
+                customActions = encodeActionIds(next.customActions),
                 updatedAt = now
             )
         }
@@ -690,8 +699,7 @@ abstract class ListsDao {
         UPDATE file_review_state
         SET isCompleted = :isCompleted,
             isFavorite = :isFavorite,
-            custom1 = :custom1,
-            custom2 = :custom2,
+            customActions = :customActions,
             updatedAt = :updatedAt
         WHERE id = :id
         """
@@ -700,8 +708,7 @@ abstract class ListsDao {
         id: Long,
         isCompleted: Boolean,
         isFavorite: Boolean,
-        custom1: Boolean,
-        custom2: Boolean,
+        customActions: String,
         updatedAt: Long
     )
 
@@ -853,11 +860,11 @@ abstract class ListsDao {
     @Query("UPDATE list_items SET isFavorite = :enabled WHERE id = :id")
     protected abstract suspend fun setItemFavorite(id: Long, enabled: Boolean)
 
-    @Query("UPDATE list_items SET custom1 = :enabled WHERE id = :id")
-    protected abstract suspend fun setItemCustom1(id: Long, enabled: Boolean)
+    @Query("SELECT customActions FROM list_items WHERE id = :id")
+    protected abstract suspend fun getItemCustomActions(id: Long): String?
 
-    @Query("UPDATE list_items SET custom2 = :enabled WHERE id = :id")
-    protected abstract suspend fun setItemCustom2(id: Long, enabled: Boolean)
+    @Query("UPDATE list_items SET customActions = :actions WHERE id = :id")
+    protected abstract suspend fun setItemCustomActions(id: Long, actions: String)
 
     @Query("SELECT COALESCE(MAX(sortOrder), -1) FROM list_items WHERE listId = :listId")
     protected abstract suspend fun maxSortOrder(listId: Long): Int

@@ -3,6 +3,7 @@ package me.ashikoki.listea
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
 import me.ashikoki.listea.data.decisions
+import me.ashikoki.listea.data.encodeActionIds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -23,9 +24,8 @@ class WebhookPayloadTest {
 
     private fun item(
         sourcePath: String?,
-        favorite: Boolean = false,
-        custom1: Boolean = false,
-        custom2: Boolean = false
+        vararg actions: String,
+        favorite: Boolean = false
     ) = ListItemEntity(
         id = 173,
         publicId = "0AT9K3QWMB-4H7ZP2-XC5N0V",
@@ -35,8 +35,15 @@ class WebhookPayloadTest {
         createdAt = 0,
         sourceRelativePath = sourcePath,
         isFavorite = favorite,
-        custom1 = custom1,
-        custom2 = custom2
+        customActions = encodeActionIds(actions.toSet())
+    )
+
+    /** The two out-of-the-box actions, with whatever wire values a test is about. */
+    private fun settings(c1Value: String = "cust1", c2Value: String = "cust2") = AppSettings(
+        customActions = listOf(
+            CustomAction(id = "custom1", displayName = "C1", webhookValue = c1Value),
+            CustomAction(id = "custom2", displayName = "C2", webhookValue = c2Value)
+        )
     )
 
     @Test
@@ -97,12 +104,12 @@ class WebhookPayloadTest {
         )
         assertEquals(
             listOf("favorite", "cust2"),
-            itemActionNames(item("a.jpg", favorite = true, custom2 = true).decisions, settings)
+            itemActionNames(item("a.jpg", "custom2", favorite = true).decisions, settings)
         )
         assertEquals(
             listOf("favorite", "cust1", "cust2"),
             itemActionNames(
-                item("a.jpg", favorite = true, custom1 = true, custom2 = true).decisions,
+                item("a.jpg", "custom1", "custom2", favorite = true).decisions,
                 settings
             )
         )
@@ -111,18 +118,18 @@ class WebhookPayloadTest {
     @Test
     fun `completion and actions are independent`() {
         val settings = AppSettings()
-        val unchecked = item("a.jpg", custom1 = true).decisions.copy(isCompleted = false)
+        val unchecked = item("a.jpg", "custom1").decisions.copy(isCompleted = false)
         assertEquals(listOf("cust1"), itemActionNames(unchecked, settings))
         assertEquals(listOf("cust1"), itemActionNames(unchecked.copy(isCompleted = true), settings))
     }
 
     @Test
     fun `configured wire values replace the defaults`() {
-        val settings = AppSettings(custom1WebhookValue = "tag1", custom2WebhookValue = "tag2")
+        val settings = settings(c1Value = "tag1", c2Value = "tag2")
         assertEquals(
             listOf("favorite", "tag1", "tag2"),
             itemActionNames(
-                item("a.jpg", favorite = true, custom1 = true, custom2 = true).decisions,
+                item("a.jpg", "custom1", "custom2", favorite = true).decisions,
                 settings
             )
         )
@@ -130,8 +137,8 @@ class WebhookPayloadTest {
 
     @Test
     fun `favorite is not configurable`() {
-        // Renaming the custom slots must never touch the one fixed action.
-        val settings = AppSettings(custom1WebhookValue = "favorite")
+        // Renaming a custom action must never touch the one fixed action.
+        val settings = settings(c1Value = "favorite")
         assertEquals(
             listOf("favorite"),
             itemActionNames(item("a.jpg", favorite = true).decisions, settings)
@@ -139,23 +146,31 @@ class WebhookPayloadTest {
     }
 
     @Test
-    fun `two slots sharing a wire value emit it once`() {
-        val settings = AppSettings(custom1WebhookValue = "tag", custom2WebhookValue = "tag")
+    fun `two actions sharing a wire value emit it once`() {
+        val settings = settings(c1Value = "tag", c2Value = "tag")
         assertEquals(
             listOf("tag"),
-            itemActionNames(item("a.jpg", custom1 = true, custom2 = true).decisions, settings)
+            itemActionNames(item("a.jpg", "custom1", "custom2").decisions, settings)
         )
     }
 
     @Test
-    fun `renaming a slot does not change which slots are selected`() {
-        // The boolean means "slot 1 is selected", so the item is untouched and only the emitted
-        // string moves. This is the whole point of keeping names out of the item row.
-        val marked = item("a.jpg", custom1 = true).decisions
+    fun `renaming an action does not change which actions are selected`() {
+        // The item holds the id, so it is untouched and only the emitted string moves. This is
+        // the whole point of keeping names out of the item row.
+        val marked = item("a.jpg", "custom1").decisions
         assertEquals(listOf("cust1"), itemActionNames(marked, AppSettings()))
-        assertEquals(
-            listOf("archive"),
-            itemActionNames(marked, AppSettings(custom1WebhookValue = "archive"))
-        )
+        assertEquals(listOf("archive"), itemActionNames(marked, settings(c1Value = "archive")))
+    }
+
+    @Test
+    fun `an action the user deleted is carried but not sent`() {
+        // Deleting a button is a decision about the bar, not about the files already marked with
+        // it: the id stays on the row, and stops resolving to anything the webhook can name.
+        val marked = item("a.jpg", "custom1", favorite = true).decisions
+        val settings = AppSettings(customActions = emptyList())
+
+        assertEquals(setOf("custom1"), marked.customActions)
+        assertEquals(listOf("favorite"), itemActionNames(marked, settings))
     }
 }

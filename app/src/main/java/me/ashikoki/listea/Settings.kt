@@ -1,6 +1,7 @@
 package me.ashikoki.listea
 
 import android.content.Context
+import androidx.compose.runtime.Immutable
 import androidx.datastore.core.IOException
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.map
 import me.ashikoki.listea.data.ItemAction
 import me.ashikoki.listea.data.ReviewDecisions
 import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.newActionId
 
 /**
  * App-wide configuration: the settings that outlive any one list, folder or review.
@@ -27,11 +29,15 @@ import me.ashikoki.listea.data.ListItemEntity
 data class AppSettings(
     val folderQuickReviewEnabled: Boolean = true,
 
-    val custom1DisplayName: String = ItemAction.CUSTOM1.defaultLabel,
-    val custom1WebhookValue: String = ItemAction.CUSTOM1.defaultWireName,
-
-    val custom2DisplayName: String = ItemAction.CUSTOM2.defaultLabel,
-    val custom2WebhookValue: String = ItemAction.CUSTOM2.defaultWireName,
+    /**
+     * The actions the review bar offers, beyond the built-in favourite, in the order it offers
+     * them and the order the webhook emits them.
+     *
+     * A list rather than a fixed pair: there can be none, there can be many, and adding one is
+     * not a schema change because an item stores the ids it carries rather than a column each.
+     * Two are configured out of the box, which is what every existing install already had.
+     */
+    val customActions: List<CustomAction> = DefaultCustomActions,
 
     val defaultWebhookEnabled: Boolean = false,
     val defaultWebhookUrl: String = "",
@@ -130,10 +136,21 @@ data class AppSettings(
      * with its built-in label.
      */
     fun labelOf(action: ItemAction): String = when (action) {
-        ItemAction.FAVORITE -> action.defaultLabel
-        ItemAction.CUSTOM1 -> custom1DisplayName
-        ItemAction.CUSTOM2 -> custom2DisplayName
+        ItemAction.Favourite -> ItemAction.Favourite.Label
+        is ItemAction.Custom -> customActionOf(action.id)?.displayName ?: action.id
     }
+
+    /**
+     * Every action the bar offers, favourite first and the configured ones in their own order.
+     *
+     * The one place that order is decided, so the bar, the Info sheet and the payload cannot
+     * disagree about it.
+     */
+    val actions: List<ItemAction>
+        get() = listOf(ItemAction.Favourite) + customActions.map { ItemAction.Custom(it.id) }
+
+    /** The configuration behind an id, or null once the user has deleted it. */
+    fun customActionOf(id: String): CustomAction? = customActions.firstOrNull { it.id == id }
 
     /**
      * What the webhook calls this action. Resolved from settings at delivery time, never stored
@@ -141,10 +158,81 @@ data class AppSettings(
      * selected", so renaming the wire value changes future payloads without migrating any row.
      */
     fun wireOf(action: ItemAction): String = when (action) {
-        ItemAction.FAVORITE -> action.defaultWireName
-        ItemAction.CUSTOM1 -> custom1WebhookValue
-        ItemAction.CUSTOM2 -> custom2WebhookValue
+        ItemAction.Favourite -> ItemAction.Favourite.WireName
+        is ItemAction.Custom -> customActionOf(action.id)?.webhookValue ?: action.id
     }
+}
+
+/**
+ * One configured action: what it is called, what it is sent as, and what items store to say they
+ * carry it.
+ *
+ * [id] is the only part an item ever holds. [displayName] and [webhookValue] are free to change
+ * under it — that separation is the whole reason renaming an action does not touch a single row —
+ * and neither is required to be unique, because two actions that look alike or send alike are odd
+ * rather than dangerous.
+ */
+@Immutable
+data class CustomAction(
+    val id: String,
+    val displayName: String,
+    val webhookValue: String
+)
+
+/**
+ * What a fresh install starts with, and what the two original slots migrate to.
+ *
+ * The ids are the migration: an item marked with the old `custom1` column is written out as the
+ * id `custom1`, so it keeps pointing at the action the user marked it with rather than becoming
+ * an orphan on upgrade.
+ */
+val DefaultCustomActions: List<CustomAction> = listOf(
+    CustomAction(id = "custom1", displayName = "C1", webhookValue = "cust1"),
+    CustomAction(id = "custom2", displayName = "C2", webhookValue = "cust2")
+)
+
+/**
+ * How the action list is stored: one record per line, three tab-separated fields.
+ *
+ * Hand-rolled rather than JSON because org.json is Android's and this has to be readable by a
+ * host test. The two separators are stripped from anything the user types on the way in, so a
+ * display name can be anything else at all without being able to corrupt the record after it.
+ */
+fun encodeCustomActions(actions: List<CustomAction>): String =
+    actions.joinToString("\n") { "${it.id}\t${it.displayName}\t${it.webhookValue}" }
+
+/**
+ * Tolerant on purpose: a record with no id is dropped, a record missing later fields keeps what
+ * it has, and an id carrying a comma is refused because that is the separator items store with.
+ * Anything unreadable costs its own line rather than the whole list.
+ */
+fun decodeCustomActions(text: String): List<CustomAction> =
+    text.split('\n').mapNotNull { line ->
+        val fields = line.split('\t')
+        val id = fields.getOrNull(0)?.trim().orEmpty()
+        if (id.isEmpty() || id.contains(',')) return@mapNotNull null
+        CustomAction(
+            id = id,
+            displayName = fields.getOrNull(1).orEmpty(),
+            webhookValue = fields.getOrNull(2).orEmpty()
+        )
+    }
+
+/** Keeps typed text to one line, so it cannot break the record it is stored in. */
+fun sanitizeActionText(value: String): String =
+    value.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim()
+
+/**
+ * The name and wire value a newly added action starts with.
+ *
+ * Numbered from the first free slot rather than from the count, so adding one after deleting one
+ * does not hand out a name that is already on the bar.
+ */
+fun nextCustomActionDefaults(existing: List<CustomAction>): CustomAction {
+    val taken = existing.map { it.displayName }.toSet()
+    var index = existing.size + 1
+    while ("C$index" in taken) index++
+    return CustomAction(id = newActionId(), displayName = "C$index", webhookValue = "cust$index")
 }
 
 /**
@@ -155,11 +243,11 @@ data class AppSettings(
  * a receiver than emitting it once. Order stays fixed either way.
  */
 fun itemActionNames(decisions: ReviewDecisions, settings: AppSettings): List<String> =
-    ItemAction.entries.filter { it.isSetOn(decisions) }.map { settings.wireOf(it) }.distinct()
+    settings.actions.filter { it.isSetOn(decisions) }.map { settings.wireOf(it) }.distinct()
 
 /** Compact "★ · Save" summary for a checklist row, or null when the item carries no actions. */
 fun itemActionLabel(decisions: ReviewDecisions, settings: AppSettings): String? =
-    ItemAction.entries.filter { it.isSetOn(decisions) }
+    settings.actions.filter { it.isSetOn(decisions) }
         .takeIf { it.isNotEmpty() }
         ?.joinToString(" · ") { settings.labelOf(it) }
 
@@ -186,10 +274,7 @@ class SettingsStore(context: Context) {
             AppSettings(
                 folderQuickReviewEnabled = prefs[KEY_QUICK_REVIEW]
                     ?: defaults.folderQuickReviewEnabled,
-                custom1DisplayName = prefs[KEY_C1_NAME] ?: defaults.custom1DisplayName,
-                custom1WebhookValue = prefs[KEY_C1_VALUE] ?: defaults.custom1WebhookValue,
-                custom2DisplayName = prefs[KEY_C2_NAME] ?: defaults.custom2DisplayName,
-                custom2WebhookValue = prefs[KEY_C2_VALUE] ?: defaults.custom2WebhookValue,
+                customActions = readCustomActions(prefs),
                 defaultWebhookEnabled = prefs[KEY_WEBHOOK_ENABLED]
                     ?: defaults.defaultWebhookEnabled,
                 defaultWebhookUrl = prefs[KEY_WEBHOOK_URL] ?: defaults.defaultWebhookUrl,
@@ -237,13 +322,50 @@ class SettingsStore(context: Context) {
     suspend fun setFolderQuickReviewEnabled(enabled: Boolean) =
         put { it[KEY_QUICK_REVIEW] = enabled }
 
-    suspend fun setCustom1DisplayName(name: String) = put { it[KEY_C1_NAME] = name.trim() }
+    /**
+     * Appends an action, named from the first free slot.
+     *
+     * Read-modify-write inside one edit, like every other change to this list, so two taps in
+     * quick succession add two actions rather than racing to add the same one.
+     */
+    suspend fun addCustomAction() = put { prefs ->
+        val existing = readCustomActions(prefs)
+        prefs[KEY_CUSTOM_ACTIONS] =
+            encodeCustomActions(existing + nextCustomActionDefaults(existing))
+    }
 
-    suspend fun setCustom1WebhookValue(value: String) = put { it[KEY_C1_VALUE] = value.trim() }
+    /** Renames one action, or changes what it sends. An unknown id writes nothing. */
+    suspend fun updateCustomAction(
+        id: String,
+        displayName: String? = null,
+        webhookValue: String? = null
+    ) = put { prefs ->
+        prefs[KEY_CUSTOM_ACTIONS] = encodeCustomActions(
+            readCustomActions(prefs).map { action ->
+                if (action.id != id) {
+                    action
+                } else {
+                    action.copy(
+                        displayName = displayName?.let(::sanitizeActionText) ?: action.displayName,
+                        webhookValue = webhookValue?.let(::sanitizeActionText) ?: action.webhookValue
+                    )
+                }
+            }
+        )
+    }
 
-    suspend fun setCustom2DisplayName(name: String) = put { it[KEY_C2_NAME] = name.trim() }
-
-    suspend fun setCustom2WebhookValue(value: String) = put { it[KEY_C2_VALUE] = value.trim() }
+    /**
+     * Takes an action off the bar.
+     *
+     * Items that carry it are not touched. The id stays on the rows that hold it, invisible and
+     * unsent, because deleting a button is a decision about the bar and not about the files
+     * somebody has already marked with it — and because this app does not quietly rewrite
+     * decisions the user made.
+     */
+    suspend fun removeCustomAction(id: String) = put { prefs ->
+        prefs[KEY_CUSTOM_ACTIONS] =
+            encodeCustomActions(readCustomActions(prefs).filterNot { it.id == id })
+    }
 
     suspend fun setDefaultWebhookEnabled(enabled: Boolean) =
         put { it[KEY_WEBHOOK_ENABLED] = enabled }
@@ -292,12 +414,40 @@ class SettingsStore(context: Context) {
             encodeFolderArrangements(rememberArrangement(existing, folderKey, arrangement))
     }
 
+    /**
+     * The configured actions, from the list if one has ever been written and from the two
+     * original slots if not.
+     *
+     * The fallback is the upgrade path, and it is a read rather than a one-off rewrite on
+     * purpose: an install that never opens this page keeps working off its old keys forever, and
+     * the first change made here is what settles the new form. The ids match what the database
+     * migration wrote onto the items, so a file marked C1 in the old world is still marked C1.
+     */
+    private fun readCustomActions(
+        prefs: androidx.datastore.preferences.core.Preferences
+    ): List<CustomAction> {
+        prefs[KEY_CUSTOM_ACTIONS]?.let { return decodeCustomActions(it) }
+
+        val legacy = DefaultCustomActions.mapIndexed { index, default ->
+            val name = if (index == 0) prefs[KEY_C1_NAME] else prefs[KEY_C2_NAME]
+            val value = if (index == 0) prefs[KEY_C1_VALUE] else prefs[KEY_C2_VALUE]
+            default.copy(
+                displayName = name ?: default.displayName,
+                webhookValue = value ?: default.webhookValue
+            )
+        }
+        return legacy
+    }
+
     private suspend fun put(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         dataStore.edit(block)
     }
 
     private companion object {
         val KEY_QUICK_REVIEW = booleanPreferencesKey("folder_quick_review_enabled")
+        val KEY_CUSTOM_ACTIONS = stringPreferencesKey("custom_actions")
+
+        // Read-only from here on: what an install configured before actions became a list.
         val KEY_C1_NAME = stringPreferencesKey("custom1_display_name")
         val KEY_C1_VALUE = stringPreferencesKey("custom1_webhook_value")
         val KEY_C2_NAME = stringPreferencesKey("custom2_display_name")

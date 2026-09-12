@@ -393,11 +393,11 @@ fun ReviewActionBar(
             itemVerticalAlignment = Alignment.CenterVertically
         ) {
             // Fixed order, so the row never reshuffles as actions are toggled.
-            ItemAction.entries.forEach { action ->
+            settings.actions.forEach { action ->
                 val isSet = action.isSetOn(item.decisions)
-                if (action == ItemAction.FAVORITE) {
+                if (action == ItemAction.Favourite) {
                     // The only action whose meaning is fixed, so it is the only one shown as a
-                    // symbol; the custom slots say whatever Settings has named them.
+                    // symbol; the custom ones say whatever Settings has named them.
                     FilterChip(
                         selected = isSet,
                         onClick = { onToggleAction(action, !isSet) },

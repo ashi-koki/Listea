@@ -38,6 +38,7 @@ import me.ashikoki.listea.data.newItemPublicId
 import me.ashikoki.listea.data.ReviewItem
 import me.ashikoki.listea.data.ScannedFile
 import me.ashikoki.listea.data.decisions
+import me.ashikoki.listea.data.encodeActionIds
 import me.ashikoki.listea.data.rootRelativePathOf
 import me.ashikoki.listea.data.toReviewItem
 import me.ashikoki.listea.data.WebhookRecordEntity
@@ -886,17 +887,17 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         settingsStore.setFolderQuickReviewEnabled(enabled)
     }
 
-    fun setCustom1DisplayName(name: String) = launchDb { settingsStore.setCustom1DisplayName(name) }
+    fun addCustomAction() = launchDb { settingsStore.addCustomAction() }
 
-    fun setCustom1WebhookValue(value: String) = launchDb {
-        settingsStore.setCustom1WebhookValue(value)
+    fun setCustomActionDisplayName(id: String, name: String) = launchDb {
+        settingsStore.updateCustomAction(id, displayName = name)
     }
 
-    fun setCustom2DisplayName(name: String) = launchDb { settingsStore.setCustom2DisplayName(name) }
-
-    fun setCustom2WebhookValue(value: String) = launchDb {
-        settingsStore.setCustom2WebhookValue(value)
+    fun setCustomActionWebhookValue(id: String, value: String) = launchDb {
+        settingsStore.updateCustomAction(id, webhookValue = value)
     }
+
+    fun removeCustomAction(id: String) = launchDb { settingsStore.removeCustomAction(id) }
 
     fun setDefaultWebhookEnabled(enabled: Boolean) = launchDb {
         settingsStore.setDefaultWebhookEnabled(enabled)
@@ -1072,8 +1073,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         rootRelativePath = (target as? DecisionTarget.File)?.relativePath,
         sourceMissing = sourceMissing,
         isFavorite = decisions.isFavorite,
-        custom1 = decisions.custom1,
-        custom2 = decisions.custom2
+        customActions = encodeActionIds(decisions.customActions)
     )
 
 

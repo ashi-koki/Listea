@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.FilterList
@@ -31,11 +32,13 @@ import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -44,6 +47,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -287,23 +291,34 @@ fun SettingsScreen(
                     "items, completion and actions."
             )
 
-            CustomActionFields(
-                title = "Custom action 1",
-                displayName = settings.custom1DisplayName,
-                webhookValue = settings.custom1WebhookValue,
-                onDisplayNameCommit = { viewModel.setCustom1DisplayName(it) },
-                onWebhookValueCommit = { viewModel.setCustom1WebhookValue(it) }
-            )
-            CustomActionFields(
-                title = "Custom action 2",
-                displayName = settings.custom2DisplayName,
-                webhookValue = settings.custom2WebhookValue,
-                onDisplayNameCommit = { viewModel.setCustom2DisplayName(it) },
-                onWebhookValueCommit = { viewModel.setCustom2WebhookValue(it) }
-            )
+            // Keyed by id so a removal takes its own fields with it: the text state inside
+            // [SettingsTextField] is seeded per stored value, and without a key the row that
+            // moved up would briefly wear the deleted row's text.
+            settings.customActions.forEachIndexed { index, action ->
+                key(action.id) {
+                    CustomActionFields(
+                        title = "Custom action ${index + 1}",
+                        action = action,
+                        onDisplayNameCommit = {
+                            viewModel.setCustomActionDisplayName(action.id, it)
+                        },
+                        onWebhookValueCommit = {
+                            viewModel.setCustomActionWebhookValue(action.id, it)
+                        },
+                        onRemove = { viewModel.removeCustomAction(action.id) }
+                    )
+                }
+            }
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            TextButton(onClick = { viewModel.addCustomAction() }) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.size(ListeaDimens.RowGap))
+                Text("Add custom action")
+            }
             HelperText(
                 "The display name is what you see on the chips. The webhook value is what future " +
-                    "payloads send. Items already marked keep their selection."
+                    "payloads send. Items already marked keep their selection, and removing an " +
+                    "action only takes it off the bar — nothing marked with it is changed."
             )
         }
 
@@ -826,26 +841,38 @@ private val ListingMaxHeight = 320.dp
 @Composable
 private fun CustomActionFields(
     title: String,
-    displayName: String,
-    webhookValue: String,
+    action: CustomAction,
     onDisplayNameCommit: (String) -> Unit,
-    onWebhookValueCommit: (String) -> Unit
+    onWebhookValueCommit: (String) -> Unit,
+    onRemove: () -> Unit
 ) {
     Spacer(Modifier.height(ListeaDimens.RowGap))
-    Text(title, style = MaterialTheme.typography.titleSmall)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.weight(1f)
+        )
+        IconButton(onClick = onRemove) {
+            Icon(Icons.Outlined.DeleteOutline, contentDescription = "Remove $title")
+        }
+    }
 
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         if (maxWidth >= CustomActionSideBySideMinWidth) {
             Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)) {
                 SettingsTextField(
                     label = "Display name",
-                    value = displayName,
+                    value = action.displayName,
                     onCommit = onDisplayNameCommit,
                     modifier = Modifier.weight(1f)
                 )
                 SettingsTextField(
                     label = "Webhook value",
-                    value = webhookValue,
+                    value = action.webhookValue,
                     onCommit = onWebhookValueCommit,
                     modifier = Modifier.weight(1f)
                 )
@@ -854,12 +881,12 @@ private fun CustomActionFields(
             Column {
                 SettingsTextField(
                     label = "Display name",
-                    value = displayName,
+                    value = action.displayName,
                     onCommit = onDisplayNameCommit
                 )
                 SettingsTextField(
                     label = "Webhook value",
-                    value = webhookValue,
+                    value = action.webhookValue,
                     onCommit = onWebhookValueCommit
                 )
             }

@@ -16,7 +16,7 @@ import androidx.sqlite.execSQL
         WebhookRecordEntity::class,
         FileReviewStateEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -321,6 +321,121 @@ abstract class ListeaDatabase : RoomDatabase() {
             }
         }
 
+
+        /**
+         * V12 makes the action slots a list instead of two columns.
+         *
+         * `custom1` and `custom2` were a promise that there would only ever be two, written into
+         * the schema of both tables that hold a decision. Adding a third would have meant a
+         * migration, and adding one from a settings page cannot mean a migration — so the pair of
+         * booleans becomes one text column holding the ids an item carries, and the number of
+         * actions stops being a fact about the database at all.
+         *
+         * Rebuilt rather than altered in place, for the same reason V11 was: SQLite learned to
+         * drop a column in 3.35, which is Android 14, and this app runs on 7.
+         *
+         * The ids the old columns become are `custom1` and `custom2`, which is exactly what
+         * [DefaultCustomActions] is configured with. That is what makes this upgrade invisible:
+         * an item marked C1 yesterday resolves to the action still called C1 today, keeps its
+         * label, and goes out under the same wire value.
+         *
+         * Favourite is untouched. It is the one action Listea knows the meaning of, so it keeps
+         * a column of its own.
+         */
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(connection: SQLiteConnection) {
+                rebuildWithActionIds(
+                    connection = connection,
+                    table = "list_items",
+                    columns = "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "publicId TEXT NOT NULL DEFAULT '', " +
+                        "listId INTEGER NOT NULL, " +
+                        "title TEXT NOT NULL, " +
+                        "isCompleted INTEGER NOT NULL DEFAULT 0, " +
+                        "sortOrder INTEGER NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "sourceUri TEXT, " +
+                        "sourceRelativePath TEXT, " +
+                        "rootRelativePath TEXT, " +
+                        "sourceMissing INTEGER NOT NULL DEFAULT 0, " +
+                        "sourceSizeBytes INTEGER, " +
+                        "sourceModifiedAt INTEGER, " +
+                        "isFavorite INTEGER NOT NULL DEFAULT 0, " +
+                        "customActions TEXT NOT NULL DEFAULT '', " +
+                        "FOREIGN KEY(listId) REFERENCES lists(id) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE",
+                    carried = "id, publicId, listId, title, isCompleted, sortOrder, createdAt, " +
+                        "sourceUri, sourceRelativePath, rootRelativePath, sourceMissing, " +
+                        "sourceSizeBytes, sourceModifiedAt, isFavorite",
+                    indices = listOf(
+                        "CREATE INDEX IF NOT EXISTS index_list_items_listId " +
+                            "ON list_items (listId)",
+                        "CREATE INDEX IF NOT EXISTS index_list_items_rootRelativePath " +
+                            "ON list_items (rootRelativePath)"
+                    )
+                )
+
+                rebuildWithActionIds(
+                    connection = connection,
+                    table = "file_review_state",
+                    columns = "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "publicId TEXT NOT NULL DEFAULT '', " +
+                        "rootUri TEXT NOT NULL, " +
+                        "relativePath TEXT NOT NULL, " +
+                        "isCompleted INTEGER NOT NULL DEFAULT 0, " +
+                        "isFavorite INTEGER NOT NULL DEFAULT 0, " +
+                        "customActions TEXT NOT NULL DEFAULT '', " +
+                        "sourceMissing INTEGER NOT NULL DEFAULT 0, " +
+                        "updatedAt INTEGER NOT NULL",
+                    carried = "id, publicId, rootUri, relativePath, isCompleted, isFavorite, " +
+                        "sourceMissing, updatedAt",
+                    indices = listOf(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                            "index_file_review_state_rootUri_relativePath " +
+                            "ON file_review_state (rootUri, relativePath)"
+                    )
+                )
+            }
+        }
+
+        /**
+         * Copies one decision-carrying table into the same shape with `custom1`/`custom2` folded
+         * into a `customActions` id set.
+         *
+         * [carried] is every column that survives unchanged, named explicitly rather than taken
+         * from `SELECT *`: the two tables differ, and a positional copy that silently kept
+         * working after a column moved is not worth the brevity.
+         *
+         * The fold is done in SQL rather than row by row because it is four cases and no reads
+         * are needed to decide between them. The order inside the string matches what
+         * `encodeActionIds` produces, so a row written by this migration is byte-identical to the
+         * same row written by the app.
+         */
+        private fun rebuildWithActionIds(
+            connection: SQLiteConnection,
+            table: String,
+            columns: String,
+            carried: String,
+            indices: List<String>
+        ) {
+            val staging = "${table}_v12"
+
+            connection.execSQL("DROP TABLE IF EXISTS $staging")
+            connection.execSQL("CREATE TABLE $staging ($columns)")
+            connection.execSQL(
+                "INSERT INTO $staging ($carried, customActions) " +
+                    "SELECT $carried, CASE " +
+                    "WHEN custom1 = 1 AND custom2 = 1 THEN 'custom1,custom2' " +
+                    "WHEN custom1 = 1 THEN 'custom1' " +
+                    "WHEN custom2 = 1 THEN 'custom2' " +
+                    "ELSE '' END " +
+                    "FROM $table"
+            )
+            connection.execSQL("DROP TABLE $table")
+            connection.execSQL("ALTER TABLE $staging RENAME TO $table")
+            indices.forEach(connection::execSQL)
+        }
+
         @Volatile
         private var instance: ListeaDatabase? = null
 
@@ -340,7 +455,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
-                    MIGRATION_10_11
+                    MIGRATION_10_11,
+                    MIGRATION_11_12
                 )
                     .build()
                     .also { instance = it }

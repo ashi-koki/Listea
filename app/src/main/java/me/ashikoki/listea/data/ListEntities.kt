@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import java.util.UUID
 
 @Entity(tableName = "lists")
 data class ListEntity(
@@ -114,15 +115,18 @@ data class ListItemEntity(
 
     /**
      * Review actions: metadata for downstream automation, deliberately not completion state.
-     * Checking an item is not an action, and setting an action never checks anything. Stored as
-     * three flat columns rather than a tag table, because the set is fixed for now.
+     * Checking an item is not an action, and setting an action never checks anything.
+     *
+     * Favourite keeps a column of its own because Listea knows what it means. The configured
+     * actions do not — there can be any number of them and they can come and go — so they are
+     * held as a set of ids in one column, encoded by [encodeActionIds]. A column per action would
+     * mean a schema migration every time the user pressed the add button.
      *
      * Manual items only, for the same reason as [isCompleted]: an action is a decision about a
      * file, and a decision about a file is stored against the file.
      */
     val isFavorite: Boolean = false,
-    val custom1: Boolean = false,
-    val custom2: Boolean = false
+    val customActions: String = ""
 )
 
 /**
@@ -162,8 +166,9 @@ data class FileReviewStateEntity(
     val relativePath: String,
     val isCompleted: Boolean = false,
     val isFavorite: Boolean = false,
-    val custom1: Boolean = false,
-    val custom2: Boolean = false,
+
+    /** The configured actions this file carries, as ids. See [ListItemEntity.customActions]. */
+    val customActions: String = "",
 
     /**
      * Set when the file behind this state is gone, exactly as [ListItemEntity.sourceMissing] is.
@@ -184,18 +189,57 @@ data class FileReviewStateEntity(
 data class FileCompletion(val relativePath: String, val isCompleted: Boolean)
 
 /**
- * The four decisions a review can hold about one item, apart from where they are stored.
+ * Every decision a review can hold about one item, apart from where they are stored.
  *
  * Exists so the screens can stop caring whether they are looking at a List's row or a folder's
  * file. Both produce one of these, and the action bar, the Info sheet and the webhook all read it
  * the same way.
+ *
+ * [customActions] holds ids, not labels and not wire values. What an id is called and what it is
+ * sent as are configuration, resolved from AppSettings at the moment they are needed — which is
+ * what lets an action be renamed without rewriting a single row.
+ *
+ * An id that no longer matches any configured action is kept rather than dropped. Deleting an
+ * action is a decision about the bar, not about the files somebody has already marked, and a
+ * decision this app has recorded is not something it discards behind the user's back.
  */
 data class ReviewDecisions(
     val isCompleted: Boolean = false,
     val isFavorite: Boolean = false,
-    val custom1: Boolean = false,
-    val custom2: Boolean = false
+    val customActions: Set<String> = emptySet()
 )
+
+/**
+ * How a set of action ids is stored in one column.
+ *
+ * Sorted, so the same set always writes the same string: storage that varies with the order the
+ * user happened to tap things is storage that looks changed when nothing has.
+ *
+ * Comma-separated, which is safe because an id is generated rather than typed — see [newActionId].
+ * Blanks are dropped going in and coming out, so a row written by hand decodes to something sane
+ * rather than to a set containing an empty string.
+ */
+fun encodeActionIds(ids: Set<String>): String =
+    ids.filter { it.isNotBlank() }.sorted().joinToString(",")
+
+fun decodeActionIds(text: String): Set<String> =
+    text.split(',').filter { it.isNotBlank() }.toSet()
+
+/**
+ * An id for a newly created action.
+ *
+ * Generated rather than derived from the name, because the name is the one thing about an action
+ * that is expected to change: an id taken from "Save" would either have to be rewritten across
+ * every item the day it became "Keep", or stop matching the thing it names. It is never shown.
+ *
+ * `custom1` and `custom2` are reserved — they are what the two original slots became — so an item
+ * marked before there was any such thing still resolves to the action it was marked with.
+ */
+fun newActionId(): String =
+    "a" + UUID.randomUUID().toString().replace("-", "").take(ActionIdChars)
+
+/** Long enough that a collision is not worth thinking about, short enough to read in a log. */
+private const val ActionIdChars = 12
 
 /**
  * A file's path from the SAF root: the owning list's folder, then the file's path inside it.
@@ -208,11 +252,11 @@ fun rootRelativePathOf(listPath: String, itemPath: String): String =
 
 /** The decisions a file's stored state is carrying. */
 val FileReviewStateEntity.decisions: ReviewDecisions
-    get() = ReviewDecisions(isCompleted, isFavorite, custom1, custom2)
+    get() = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions))
 
 /** The decisions a stored row is carrying, whatever its origin. */
 val ListItemEntity.decisions: ReviewDecisions
-    get() = ReviewDecisions(isCompleted, isFavorite, custom1, custom2)
+    get() = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions))
 
 /**
  * Where a decision is written when the user makes one.
@@ -303,30 +347,52 @@ fun ListItemEntity.toReviewItem(rootUri: String?): ReviewItem = ReviewItem(
 )
 
 /**
- * The fixed set of downstream action slots an item can carry. Declaration order is the order the
- * webhook emits them in, so the array a receiver sees is deterministic and not dependent on how
- * the user toggled them.
+ * One thing the action bar can offer an item.
  *
- * A slot's identity is the slot, not its name. The label the user sees and the value the webhook
- * sends are both configuration, held in AppSettings and resolved when they are needed; these are
- * only the factory values. That is what lets C1 be renamed without rewriting a single item row.
+ * Two kinds, and the difference is who decides what it means. [Favourite] is Listea's own: its
+ * label is a star, its wire value is fixed, and it can be neither renamed nor removed. [Custom]
+ * is whatever the user has configured — any number of them — and carries nothing but an id,
+ * because its label and its wire value are settings that can change without the items changing
+ * with them.
+ *
+ * The order actions are offered and emitted in comes from AppSettings rather than from here: it
+ * is deterministic and independent of the order the user toggled them, which is what a receiver
+ * needs from the `actions` array.
  */
-enum class ItemAction(val defaultWireName: String, val defaultLabel: String) {
-    FAVORITE("favorite", "★"),
-    CUSTOM1("cust1", "C1"),
-    CUSTOM2("cust2", "C2");
+sealed interface ItemAction {
 
-    fun isSetOn(decisions: ReviewDecisions): Boolean = when (this) {
-        FAVORITE -> decisions.isFavorite
-        CUSTOM1 -> decisions.custom1
-        CUSTOM2 -> decisions.custom2
+    /** Whether [decisions] currently carries this action. */
+    fun isSetOn(decisions: ReviewDecisions): Boolean
+
+    /** The same decisions with [enabled] applied, for a write that replaces the whole set. */
+    fun setOn(decisions: ReviewDecisions, enabled: Boolean): ReviewDecisions
+
+    data object Favourite : ItemAction {
+
+        /** Fixed, because a receiver keying on it should not depend on a settings page. */
+        const val WireName = "favorite"
+
+        /** What it is called anywhere it has to be written rather than drawn. */
+        const val Label = "★"
+
+        override fun isSetOn(decisions: ReviewDecisions): Boolean = decisions.isFavorite
+
+        override fun setOn(decisions: ReviewDecisions, enabled: Boolean): ReviewDecisions =
+            decisions.copy(isFavorite = enabled)
     }
 
-    /** The same slot with [enabled] applied, for a write that replaces the whole set. */
-    fun setOn(decisions: ReviewDecisions, enabled: Boolean): ReviewDecisions = when (this) {
-        FAVORITE -> decisions.copy(isFavorite = enabled)
-        CUSTOM1 -> decisions.copy(custom1 = enabled)
-        CUSTOM2 -> decisions.copy(custom2 = enabled)
+    data class Custom(val id: String) : ItemAction {
+
+        override fun isSetOn(decisions: ReviewDecisions): Boolean = id in decisions.customActions
+
+        override fun setOn(decisions: ReviewDecisions, enabled: Boolean): ReviewDecisions =
+            decisions.copy(
+                customActions = if (enabled) {
+                    decisions.customActions + id
+                } else {
+                    decisions.customActions - id
+                }
+            )
     }
 }
 

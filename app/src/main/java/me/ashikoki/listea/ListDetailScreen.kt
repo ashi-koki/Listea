@@ -755,30 +755,33 @@ private fun ItemRow(
 }
 
 /**
- * The item's tags: Favourite, and the two custom slots, one badge each.
+ * The item's tags: Favourite, and every configured custom action the item carries, one badge
+ * each.
  *
- * One badge per action rather than a single joined string, because these are three independent
- * flags and the row is read at a glance — "★  Save" as one line invites reading it as one label.
- * Favourite is tinted, the custom slots are not: the star is the only one of the three whose
- * meaning is fixed, and the other two say whatever Settings has named them.
+ * One badge per action rather than a single joined string, because these are independent flags
+ * and the row is read at a glance — "★  Save" as one line invites reading it as one label.
+ * Favourite is tinted, the custom ones are not: the star is the only one whose meaning is fixed,
+ * and the rest say whatever Settings has named them.
  *
- * Emits nothing at all for an item with no actions set, so an untagged list stays quiet.
+ * Drawn from the configured actions rather than from the item, so an id left behind by a deleted
+ * action stays on the row and off the screen. Emits nothing at all for an item with no actions
+ * set, so an untagged list stays quiet.
  */
 @Composable
 private fun ItemActionTags(item: ReviewItem, settings: AppSettings) {
-    val tags = ItemAction.entries.filter { it.isSetOn(item.decisions) }
+    val tags = settings.actions.filter { it.isSetOn(item.decisions) }
     if (tags.isEmpty()) return
 
     Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {
         tags.forEach { action ->
             ListeaBadge(
                 text = settings.labelOf(action),
-                container = if (action == ItemAction.FAVORITE) {
+                container = if (action == ItemAction.Favourite) {
                     MaterialTheme.colorScheme.primaryContainer
                 } else {
                     MaterialTheme.colorScheme.surfaceVariant
                 },
-                contentColor = if (action == ItemAction.FAVORITE) {
+                contentColor = if (action == ItemAction.Favourite) {
                     MaterialTheme.colorScheme.onPrimaryContainer
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
