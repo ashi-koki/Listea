@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,7 +35,6 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerControlView
 import androidx.media3.ui.PlayerView
 import coil3.ImageLoader
 import coil3.compose.AsyncImage
@@ -134,27 +135,13 @@ private fun ImagePreview(
 }
 
 /**
- * Media3 playback, split into the picture and the transport controls, because Listea's own chrome
- * now sits between them.
+ * Media3 playback: the picture, and Listea's own transport laid along the bottom of it.
  *
- * The [PlayerView] renders nothing but the video: `useController = false` takes its built-in
- * controller away *and* makes it non-clickable, which is what lets a tap or a drag anywhere over
- * a video reach the swipe card underneath. Paging and toggling the chrome therefore work the same
- * over a video as over a photograph, which they did not while PlayerView was eating every touch
- * to run its own controller.
- *
- * The controls come back as a standalone [PlayerControlView] laid over the picture, and only when
- * Listea's chrome is up: one tap raises the top bar, the action bar and the transport controls
- * together, and one tap takes all three away. It is inset by exactly what the chrome measured
- * itself to be ([LocalMediaChrome]), so the settings gear and the scrubber land in the band
- * between the two bars instead of underneath the action row - a fixed guess at the bar height
- * would be wrong the moment an action label wrapped onto a second line.
- *
- * `showTimeoutMs = 0` hands visibility entirely to the chrome: no timeout, no auto-hide, nothing
- * that could leave the video's controls and Listea's disagreeing about whether the screen is
- * showing controls at all. There is no fullscreen button, because the picture is already the
- * whole screen and a tap is what hides everything over it - and no previous/next, because the
- * player is only ever given the one item.
+ * The [PlayerView] renders nothing but the video — `useController = false` takes its built-in
+ * controls out of the tree entirely — and [VideoControlBar] supplies the transport instead. That
+ * split is what keeps a video legible while it is being controlled: Media3's own control view
+ * dims every pixel of the surface it is handed, so reaching the pause button used to mean
+ * blacking out the thing being watched.
  *
  * Zooming reaches the picture and stops there. The transform is on the [PlayerView] alone, not on
  * the box holding both it and the controls: a pinched-in video that dragged its own pause button
@@ -171,16 +158,27 @@ private fun VideoPreview(
     zoom: MediaZoomState?
 ) {
     // Bind on enter, stop on leave, so a swiped-away or closed video never keeps playing.
-    DisposableEffect(uri, autoplay, startMuted) {
+    DisposableEffect(uri, autoplay) {
         player.setMediaItem(MediaItem.fromUri(uri))
         player.prepare()
-        player.volume = if (startMuted) 0f else 1f
         player.playWhenReady = autoplay
         onDispose {
             player.pause()
             player.clearMediaItems()
         }
     }
+
+    // Keyed on the file, which is the whole point of holding this here rather than on the player:
+    // the player outlives every card, so a mute lifted on one video would stay lifted for the
+    // next and for every one after it. *Start videos muted* is a rule about arriving at a video
+    // rather than a mode to keep switching off, so every file arrives at whatever the setting
+    // says, and only the one the user actually decided about departs from it.
+    var muted by remember(uri, startMuted) { mutableStateOf(startMuted) }
+
+    // Publishing Compose state to a plain object, which is what SideEffect is for. It runs after
+    // every composition rather than off a key, so a card that has just arrived reasserts its own
+    // state even when it happens to match what the player was left at.
+    SideEffect { player.volume = if (muted) 0f else 1f }
 
     // A video's shape is not known until it has been read far enough to say so, and it is the
     // same fact an image reports from its load state: how much of the card is picture rather than
@@ -214,25 +212,16 @@ private fun VideoPreview(
         )
 
         if (chrome.visible) {
-            AndroidView(
-                factory = { context ->
-                    PlayerControlView(context).apply {
-                        this.player = player
-                        showTimeoutMs = 0
-                        setShowPreviousButton(false)
-                        setShowNextButton(false)
-                        show()
-                    }
-                },
-                // The player outlives any one card; re-point the controls at it and keep them up
-                // if the view is reused across a recomposition.
-                update = { view ->
-                    view.player = player
-                    view.show()
-                },
+            VideoControlBar(
+                player = player,
+                muted = muted,
+                onToggleMute = { muted = !muted },
+                // Directly above Listea's own action bar, so the two scrimmed strips read as one
+                // band along the bottom rather than a control panel floating in the middle of
+                // the picture.
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = chrome.top, bottom = chrome.bottom)
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = chrome.bottom)
             )
         }
     }

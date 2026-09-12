@@ -202,8 +202,8 @@ fun MediaShell(
  * height is the whole node, inset included, because that is the part of the media the caller
  * cannot use.
  *
- * 60% black is PlayerControlView's own scrim value; matching it is what makes a video's controls
- * and Listea's bars read as one dimmed layer instead of three.
+ * The scrim is [MediaChromeScrim], which is PlayerControlView's own value; matching it is what
+ * makes a video's controls and Listea's bars read as one dimmed layer instead of three.
  */
 @Composable
 private fun MediaChromeBar(
@@ -223,7 +223,11 @@ private fun MediaChromeBar(
     }
 }
 
-private val MediaChromeScrim = Color.Black.copy(alpha = 0.6f)
+/**
+ * The dim behind anything Listea draws over media, shared so a bar and the video's own volume
+ * control cannot end up two different shades of black. 60% is PlayerControlView's own scrim value.
+ */
+val MediaChromeScrim = Color.Black.copy(alpha = 0.6f)
 
 /**
  * Ties the system bars to Listea's own: both sets are up together, or neither is.
