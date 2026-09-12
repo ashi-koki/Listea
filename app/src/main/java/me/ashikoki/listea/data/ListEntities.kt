@@ -382,46 +382,52 @@ data class SourceItemRef(
 )
 
 /**
- * A webhook body that never reached a receiver, kept so the decisions inside it are not lost.
+ * One webhook delivery, kept with the body it carried.
  *
- * Written for every attempt that did not come back successful — a switched-off webhook, a missing
- * or malformed URL, a non-2xx response, a network failure — as long as there was something in it
- * to send. An empty payload is not worth keeping, and a delivery that succeeded has nothing left
- * to do.
+ * Written for every delivery that reached a verdict, whatever the verdict was: sent, failed,
+ * refused by a switched-off webhook, or declined by the user when it asked. It was once a record
+ * of failures only, and that turned out to be the wrong shape — a history that holds only the
+ * things that went wrong cannot answer "did that round actually go out?", which is the question
+ * people actually have. The one thing still not kept is a payload with no items in it: there
+ * would be nothing to resend, and nothing was attempted.
  *
  * Deliberately standalone, with no foreign key to a list: the whole point is that the payload
- * outlives whatever went wrong, and deleting the list it came from must not quietly take the
- * record with it. [payload] is the exact JSON that was going to be posted, so resending sends
- * what failed rather than something rebuilt out of state that has since moved on.
+ * outlives whatever happened to it, and deleting the list it came from must not quietly take the
+ * record with it. [payload] is the exact JSON that was posted or would have been, so a resend
+ * sends *that* rather than something rebuilt out of state that has since moved on.
  */
-@Entity(tableName = "unsent_webhooks")
-data class UnsentWebhookEntity(
+@Entity(tableName = "webhook_history")
+data class WebhookRecordEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val event: String,
     val listTitle: String,
     val itemCount: Int,
     val payload: String,
 
-    /** When the delivery failed. This is what names the record in the history. */
-    val failedAt: Long,
+    /** When this record last reached a verdict. A resend moves it; that is what makes it current. */
+    val at: Long,
 
-    /** Why it failed, in the same words the dialog used at the time. */
-    val reason: String
+    /** A [me.ashikoki.listea.NoticeOutcome] name. Stored as text so an old row survives new cases. */
+    val outcome: String,
+
+    /** How it went, in the same words the dialog used at the time. */
+    val detail: String
 )
 
 /**
- * One row of the unsent history: everything the list needs, and not the payload.
+ * One row of the webhook history: everything the list needs, and not the payload.
  *
  * A payload is as big as the round it covers, so the history observes this instead and reads the
  * body itself only when the user opens one.
  */
-data class UnsentWebhookSummary(
+data class WebhookRecordSummary(
     val id: Long,
     val event: String,
     val listTitle: String,
     val itemCount: Int,
-    val failedAt: Long,
-    val reason: String
+    val at: Long,
+    val outcome: String,
+    val detail: String
 )
 
 /** One file found by a recursive folder scan, before it becomes a [ListItemEntity]. */

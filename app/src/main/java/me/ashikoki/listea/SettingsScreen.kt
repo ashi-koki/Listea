@@ -87,9 +87,9 @@ fun SettingsScreen(
     onHistoryOpenChange: (Boolean) -> Unit = {}
 ) {
     // A page of its own rather than a section of this one: the payloads it holds are the app's,
-    // not any one list's, and Settings is where the webhook they failed to reach is configured.
+    // not any one list's, and Settings is where the webhook they were headed for is configured.
     if (historyOpen) {
-        UnsentHistoryScreen(
+        WebhookHistoryScreen(
             modifier = modifier,
             viewModel = viewModel,
             onBack = { onHistoryOpenChange(false) }
@@ -98,7 +98,8 @@ fun SettingsScreen(
     }
 
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-    val unsentCount by viewModel.unsentWebhookCount.collectAsStateWithLifecycle()
+    val historyCount by viewModel.webhookRecordCount.collectAsStateWithLifecycle()
+    val pendingCount by viewModel.pendingWebhookCount.collectAsStateWithLifecycle()
     val rootChangePreview by viewModel.rootChangePreview.collectAsStateWithLifecycle()
     val deleteRequest by viewModel.deleteCheckedRequest.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -421,16 +422,23 @@ fun SettingsScreen(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(ListeaDimens.IconSize)
                         )
-                        Text("Unsent history", style = MaterialTheme.typography.bodyMedium)
+                        Text("Webhook history", style = MaterialTheme.typography.bodyMedium)
                     }
+                    // Two numbers, because they answer different questions: how much has ever
+                    // been built, and how much of it a receiver has still not accepted. Only the
+                    // second is worth a warning, and it is mentioned only when it is not zero.
                     StatusLine(
-                        if (unsentCount == 0) {
-                            "Nothing waiting"
-                        } else {
-                            "$unsentCount payload" + (if (unsentCount == 1) "" else "s") +
-                                " waiting to be sent"
+                        when {
+                            historyCount == 0 -> "Nothing yet"
+                            pendingCount == 0 ->
+                                "$historyCount record" + (if (historyCount == 1) "" else "s") +
+                                    " · all sent"
+
+                            else ->
+                                "$historyCount record" + (if (historyCount == 1) "" else "s") +
+                                    " · $pendingCount not sent"
                         },
-                        tone = if (unsentCount == 0) StatusTone.Neutral else StatusTone.Warning
+                        tone = if (pendingCount == 0) StatusTone.Neutral else StatusTone.Warning
                     )
                 },
                 actions = {
@@ -443,9 +451,10 @@ fun SettingsScreen(
                 }
             )
             HelperText(
-                "Every webhook that does not come back successful is kept here with its payload, " +
-                    "so a round of review is never lost to a misconfigured endpoint. Resending " +
-                    "uses the default URL above and needs nothing else switched on."
+                "Every webhook Listea builds is kept here with its payload and what became of " +
+                    "it — sent, failed, or not sent at all — so a round of review is never lost " +
+                    "and you can always check whether one went out. Resending uses the default " +
+                    "URL above and needs nothing else switched on."
             )
         }
 

@@ -721,24 +721,47 @@ abstract class ListsDao {
 
     @Query(
         """
-        SELECT id, event, listTitle, itemCount, failedAt, reason
-        FROM unsent_webhooks
-        ORDER BY failedAt DESC, id DESC
+        SELECT id, event, listTitle, itemCount, at, outcome, detail
+        FROM webhook_history
+        ORDER BY at DESC, id DESC
         """
     )
-    abstract fun observeUnsentWebhooks(): Flow<List<UnsentWebhookSummary>>
+    abstract fun observeWebhookHistory(): Flow<List<WebhookRecordSummary>>
 
-    @Query("SELECT COUNT(*) FROM unsent_webhooks")
-    abstract fun observeUnsentWebhookCount(): Flow<Int>
+    /** Everything ever recorded, for the Settings line that says how big the history is. */
+    @Query("SELECT COUNT(*) FROM webhook_history")
+    abstract fun observeWebhookRecordCount(): Flow<Int>
+
+    /**
+     * The records that still have somewhere to go: anything that did not come back successful.
+     *
+     * Counted separately from the total because they mean different things on the Settings page —
+     * the total is how much history there is, and this is how much of it is still owed to a
+     * receiver. Only this one is worth a warning tint.
+     */
+    @Query("SELECT COUNT(*) FROM webhook_history WHERE outcome != 'SENT'")
+    abstract fun observePendingWebhookCount(): Flow<Int>
 
     @Insert
-    abstract suspend fun insertUnsentWebhook(record: UnsentWebhookEntity): Long
+    abstract suspend fun insertWebhookRecord(record: WebhookRecordEntity): Long
 
-    @Query("SELECT * FROM unsent_webhooks WHERE id = :id")
-    abstract suspend fun getUnsentWebhook(id: Long): UnsentWebhookEntity?
+    @Query("SELECT * FROM webhook_history WHERE id = :id")
+    abstract suspend fun getWebhookRecord(id: Long): WebhookRecordEntity?
 
-    @Query("DELETE FROM unsent_webhooks WHERE id = :id")
-    abstract suspend fun deleteUnsentWebhook(id: Long)
+    /**
+     * Moves a record on to its newest verdict, after a resend.
+     *
+     * The row is updated rather than a second one appended, because a record *is* one payload:
+     * the history is a list of bodies and what became of each, not a log of every attempt at one.
+     * Appending would turn a receiver that was down for an hour into a page the user has to
+     * clean up by hand. The payload column is deliberately not touched — what is resent is byte
+     * for byte what was built the first time.
+     */
+    @Query("UPDATE webhook_history SET at = :at, outcome = :outcome, detail = :detail WHERE id = :id")
+    abstract suspend fun updateWebhookRecord(id: Long, at: Long, outcome: String, detail: String)
+
+    @Query("DELETE FROM webhook_history WHERE id = :id")
+    abstract suspend fun deleteWebhookRecord(id: Long)
 
     @Query("UPDATE lists SET reviewCurrentItemId = :itemId WHERE id = :id")
     abstract suspend fun setReviewPosition(id: Long, itemId: Long?)

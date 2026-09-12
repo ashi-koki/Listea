@@ -35,29 +35,32 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import me.ashikoki.listea.data.UnsentWebhookSummary
+import me.ashikoki.listea.data.WebhookRecordSummary
 import org.json.JSONObject
 
 /**
- * Every webhook body that never reached a receiver, and the two things you can do about one.
+ * Every webhook body Listea has built, what became of it, and the two things you can do about one.
  *
- * A failed delivery used to leave nothing behind but a dialog the user had already dismissed: the
- * round of review it described was gone, and the only way to send it was to do the round again.
- * This page is that dialog made durable. Records are written by the delivery path, never here,
- * and this screen only replays them or throws them away.
+ * It began as a place for failures — a failed delivery used to leave nothing behind but a dialog
+ * the user had already dismissed, and the round it described was gone. Keeping only failures then
+ * turned out to be its own gap: "did that round go out?" is the question people actually have,
+ * and a page that answers it only when the answer is no is a page you cannot trust. So a record
+ * is written for every delivery that reached a verdict — sent, failed, refused by a switched-off
+ * webhook, or declined when the app asked — and this page shows all of them.
  *
- * Resending posts to the default URL in Settings, deliberately without asking whether the default
- * webhook is switched *on* — a record exists because something was misconfigured, and the switch
- * is one of the things it might have been. Both the result and any failure land in the same
- * top-level dialog every other delivery uses.
+ * Records are written by the delivery path, never here; this screen only replays them or throws
+ * them away. Resending posts to the default URL in Settings, deliberately without asking whether
+ * the default webhook is switched *on* — a record may exist precisely because something was
+ * misconfigured, and the switch is one of the things it might have been. Both the progress and
+ * the result land in the same top-level dialogs every other delivery uses.
  */
 @Composable
-fun UnsentHistoryScreen(
+fun WebhookHistoryScreen(
     modifier: Modifier,
     viewModel: ListsViewModel,
     onBack: () -> Unit
 ) {
-    val records by viewModel.unsentWebhooks.collectAsStateWithLifecycle()
+    val records by viewModel.webhookHistory.collectAsStateWithLifecycle()
 
     // Survives rotation, and is only an id: the payload behind it is read when the dialog opens.
     var openRecordId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -66,7 +69,7 @@ fun UnsentHistoryScreen(
 
     ListeaNestedScaffold(
         modifier = modifier,
-        title = "Unsent history",
+        title = "Webhook history",
         backLabel = "Settings",
         onBack = onBack,
         trailing = {
@@ -84,13 +87,13 @@ fun UnsentHistoryScreen(
                     modifier = Modifier.padding(ListeaDimens.PagePadding)
                 ) {
                     Text(
-                        "Nothing waiting",
+                        "Nothing yet",
                         style = MaterialTheme.typography.bodyLarge,
                         textAlign = TextAlign.Center
                     )
                     Text(
-                        "A webhook that does not come back successful is kept here, with its " +
-                            "payload, until you resend or delete it.",
+                        "Every webhook Listea builds is kept here with its payload — sent or " +
+                            "not — until you delete it.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -109,18 +112,18 @@ fun UnsentHistoryScreen(
             verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
         ) {
             items(records, key = { it.id }) { record ->
-                UnsentRecordCard(
+                WebhookRecordCard(
                     record = record,
                     onOpen = { openRecordId = record.id },
-                    onDelete = { viewModel.deleteUnsentWebhook(record.id) },
-                    onResend = { viewModel.resendUnsentWebhook(record.id) }
+                    onDelete = { viewModel.deleteWebhookRecord(record.id) },
+                    onResend = { viewModel.resendWebhookRecord(record.id) }
                 )
             }
         }
     }
 
     openRecordId?.let { id ->
-        UnsentPayloadDialog(
+        WebhookPayloadDialog(
             viewModel = viewModel,
             recordId = id,
             onDismiss = { openRecordId = null }
@@ -129,16 +132,21 @@ fun UnsentHistoryScreen(
 }
 
 /**
- * One kept payload: when it failed, what it was, why it did not go, and the two actions.
+ * One kept payload: when it last reached a verdict, what it was, what that verdict was, and the
+ * two actions.
  *
  * The card itself is the way into the body, the same way a list card is the way into its list, so
- * the row keeps to the failure time and its two buttons. Delete is immediate: what it removes is
- * a failed delivery, not anything the user made, and needing two taps each to clear a run of them
- * would make the page tiring in exactly the situation that produces a run of them.
+ * the row keeps to the time and its two buttons. Delete is immediate: what it removes is a record
+ * of something that already happened, not anything the user made, and needing two taps each to
+ * clear a run of them would make the page tiring in exactly the situation that produces a run.
+ *
+ * Resend is offered on a successful record too. Sending the same round twice is a thing people
+ * legitimately want — a receiver that lost it, a flow that was rebuilt — and the alternative is a
+ * button that disappears exactly when the payload is known-good.
  */
 @Composable
-private fun UnsentRecordCard(
-    record: UnsentWebhookSummary,
+private fun WebhookRecordCard(
+    record: WebhookRecordSummary,
     onOpen: () -> Unit,
     onDelete: () -> Unit,
     onResend: () -> Unit
@@ -163,7 +171,7 @@ private fun UnsentRecordCard(
                 verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
             ) {
                 Text(
-                    webhookTimestampLabel(record.failedAt),
+                    webhookTimestampLabel(record.at),
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -175,7 +183,7 @@ private fun UnsentRecordCard(
                         countOfItems(record.itemCount)
                     ).joinToString(" · ")
                 )
-                StatusLine(record.reason, tone = StatusTone.Warning)
+                StatusLine(record.detail, tone = recordTone(record.outcome))
             }
             TextButton(onClick = onDelete) { Text("Delete", maxLines = 1) }
             TextButton(onClick = onResend) { Text("Resend", maxLines = 1) }
@@ -184,20 +192,34 @@ private fun UnsentRecordCard(
 }
 
 /**
- * The body itself, exactly as it would have been posted.
+ * How loudly a record's own line reads.
+ *
+ * A delivery that went out is a success and says so; one that failed is a warning. Everything
+ * else — switched off, declined — is neither: nothing went wrong, the user or the configuration
+ * simply meant it not to go, and colouring that like a failure would make an ordinary choice look
+ * like a problem. An outcome from some future version reads neutrally rather than alarmingly.
+ */
+private fun recordTone(outcome: String): StatusTone = when (outcome) {
+    NoticeOutcome.SENT.name -> StatusTone.Positive
+    NoticeOutcome.FAILED.name -> StatusTone.Warning
+    else -> StatusTone.Neutral
+}
+
+/**
+ * The body itself, exactly as it was posted or would have been.
  *
  * Read only now, and only for this one record, because a payload is as big as the round it
  * covers. Nothing in here acts on anything: it scrolls, and it closes. Indented for reading, but
  * the stored text is what gets sent, so a body this cannot parse is shown raw rather than hidden.
  */
 @Composable
-private fun UnsentPayloadDialog(
+private fun WebhookPayloadDialog(
     viewModel: ListsViewModel,
     recordId: Long,
     onDismiss: () -> Unit
 ) {
     val payload by produceState<String?>(null, recordId) {
-        val stored = viewModel.unsentWebhookPayload(recordId)
+        val stored = viewModel.webhookRecordPayload(recordId)
         value = stored?.let { withContext(Dispatchers.Default) { prettyJson(it) } } ?: ""
     }
 
@@ -229,6 +251,3 @@ private fun prettyJson(payload: String): String =
 
 private fun countOfRecords(count: Int): String =
     "$count record" + if (count == 1) "" else "s"
-
-private fun countOfItems(count: Int): String =
-    "$count item" + if (count == 1) "" else "s"

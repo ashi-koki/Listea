@@ -135,6 +135,9 @@ data class WebhookNotice(
         get() = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(at))
 }
 
+/** "1 item" / "42 items", used wherever a payload is sized in front of the user. */
+fun countOfItems(count: Int): String = "$count item" + if (count == 1) "" else "s"
+
 /**
  * What an event is called in front of the user. One mapping, so a live result and a record of an
  * old one can never name the same event differently. An unrecognised event answers with itself

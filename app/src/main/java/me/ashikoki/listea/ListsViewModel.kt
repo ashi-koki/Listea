@@ -39,8 +39,8 @@ import me.ashikoki.listea.data.ScannedFile
 import me.ashikoki.listea.data.decisions
 import me.ashikoki.listea.data.rootRelativePathOf
 import me.ashikoki.listea.data.toReviewItem
-import me.ashikoki.listea.data.UnsentWebhookEntity
-import me.ashikoki.listea.data.UnsentWebhookSummary
+import me.ashikoki.listea.data.WebhookRecordEntity
+import me.ashikoki.listea.data.WebhookRecordSummary
 
 /** What the Folder screen should be showing about a pending "create list from folder" action. */
 sealed interface FolderListRequest {
@@ -235,15 +235,18 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /**
-     * The payloads that never got through, newest first. Observed rather than fetched so the
-     * history page and the Settings entry that leads to it can never disagree about how many
-     * there are.
+     * Every delivery ever recorded, newest first. Observed rather than fetched so the history
+     * page and the Settings entry that leads to it can never disagree about how much there is.
      */
-    val unsentWebhooks: StateFlow<List<UnsentWebhookSummary>> = dao.observeUnsentWebhooks()
+    val webhookHistory: StateFlow<List<WebhookRecordSummary>> = dao.observeWebhookHistory()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** How many are waiting, without loading a single payload to count them. */
-    val unsentWebhookCount: StateFlow<Int> = dao.observeUnsentWebhookCount()
+    /** How much history there is, without loading a single payload to count it. */
+    val webhookRecordCount: StateFlow<Int> = dao.observeWebhookRecordCount()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    /** How much of it is still owed to a receiver — the part worth drawing attention to. */
+    val pendingWebhookCount: StateFlow<Int> = dao.observePendingWebhookCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     private val _sourceFreshness = MutableStateFlow<ListFreshness?>(null)
@@ -1140,7 +1143,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
      * Split out from [deliver] when Quick Review stopped belonging to a List: a folder review has
      * a real round to report and a real body to keep, but no list row to record a delivery
      * against, so [recordAgainstList] is the one thing that differs. Everything the user sees —
-     * the notice, the unsent history, the empty-payload and switched-off cases — is deliberately
+     * the notice, the history record, the empty-payload and switched-off cases — is deliberately
      * identical, because from the user's side it is the same webhook doing the same job.
      */
     private suspend fun deliverPayload(
@@ -1169,19 +1172,21 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         fun tell(outcome: NoticeOutcome, itemCount: Int?, httpCode: Int?, error: String?) =
             announce(list.title, event, url, useDefaultWebhook, itemCount, outcome, httpCode, error)
 
-        // Anything that did not come back successful is kept, in the same words the user was
-        // just given, so the history says exactly what the dialog said. Nothing is kept for a
-        // payload with nothing in it: there would be nothing to resend.
+        // Every verdict is kept, in the same words the user was just given, so the history says
+        // exactly what the dialog said. Successes included: a history that holds only failures
+        // cannot answer "did that round actually go out?", which is the question people have.
+        // Nothing is kept for a payload with nothing in it - there would be nothing to resend.
         suspend fun keep(notice: WebhookNotice) {
             if (items.isEmpty()) return
-            dao.insertUnsentWebhook(
-                UnsentWebhookEntity(
+            dao.insertWebhookRecord(
+                WebhookRecordEntity(
                     event = event,
                     listTitle = list.title,
                     itemCount = items.size,
                     payload = payload,
-                    failedAt = now(),
-                    reason = notice.outcomeLabel
+                    at = now(),
+                    outcome = notice.outcome.name,
+                    detail = notice.outcomeLabel
                 )
             )
         }
@@ -1224,7 +1229,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             httpCode = result.httpCode,
             error = result.error
         )
-        if (!succeeded) keep(notice)
+        keep(notice)
     }
 
     /**
@@ -1238,8 +1243,8 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
      * A record is deleted only once a receiver has actually accepted it. Anything else leaves it
      * exactly where it was and says why.
      */
-    fun resendUnsentWebhook(id: Long) = launchDb {
-        val record = dao.getUnsentWebhook(id) ?: return@launchDb
+    fun resendWebhookRecord(id: Long) = launchDb {
+        val record = dao.getWebhookRecord(id) ?: return@launchDb
         val url = settingsStore.read().defaultWebhookUrl.trim()
 
         fun tell(outcome: NoticeOutcome, httpCode: Int?, error: String?) = announce(
@@ -1253,27 +1258,31 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             error = error
         )
 
+        suspend fun settle(notice: WebhookNotice) =
+            dao.updateWebhookRecord(id, now(), notice.outcome.name, notice.outcomeLabel)
+
         val urlProblem = webhookUrlError(url)
         if (urlProblem != null) {
-            tell(NoticeOutcome.FAILED, null, urlProblem)
+            settle(tell(NoticeOutcome.FAILED, null, urlProblem))
             return@launchDb
         }
 
         val result = withContext(Dispatchers.IO) { postWebhook(url, record.payload) }
         val succeeded = result.status == DeliveryStatus.SUCCESS
-        if (succeeded) dao.deleteUnsentWebhook(id)
-        tell(
-            if (succeeded) NoticeOutcome.SENT else NoticeOutcome.FAILED,
-            result.httpCode,
-            result.error
+        settle(
+            tell(
+                if (succeeded) NoticeOutcome.SENT else NoticeOutcome.FAILED,
+                result.httpCode,
+                result.error
+            )
         )
     }
 
     /** Drops a kept payload for good. The only thing in the app that can lose one. */
-    fun deleteUnsentWebhook(id: Long) = launchDb { dao.deleteUnsentWebhook(id) }
+    fun deleteWebhookRecord(id: Long) = launchDb { dao.deleteWebhookRecord(id) }
 
     /** The body itself, read only when the user opens one rather than with every history row. */
-    suspend fun unsentWebhookPayload(id: Long): String? = dao.getUnsentWebhook(id)?.payload
+    suspend fun webhookRecordPayload(id: Long): String? = dao.getWebhookRecord(id)?.payload
 
     /**
      * The list's items, or just the ones a review queued. Read fresh from the database rather

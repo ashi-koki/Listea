@@ -106,7 +106,7 @@ fun ListeaApp(
         mutableStateOf<QuickReviewTarget?>(null)
     }
     var viewingFileUri by rememberSaveable { mutableStateOf<String?>(null) }
-    var unsentHistoryOpen by rememberSaveable { mutableStateOf(false) }
+    var webhookHistoryOpen by rememberSaveable { mutableStateOf(false) }
 
     // Which folder the browser is standing in, owned here rather than by FolderScreen itself.
     // FolderScreen is composed only while Folder is the selected destination, so anything it
@@ -118,7 +118,7 @@ fun ListeaApp(
     }
 
     val nested = openListId != null || reviewListId != null ||
-        quickReview != null || viewingFileUri != null || unsentHistoryOpen
+        quickReview != null || viewingFileUri != null || webhookHistoryOpen
 
     // Android convention for a bottom bar: back from a secondary destination returns to the first
     // one rather than leaving the app. Disabled while nested, so the nested screens keep their own.
@@ -169,8 +169,8 @@ fun ListeaApp(
                 TopLevelDestination.Settings -> SettingsScreen(
                     modifier = contentModifier,
                     viewModel = listsViewModel,
-                    historyOpen = unsentHistoryOpen,
-                    onHistoryOpenChange = { unsentHistoryOpen = it }
+                    historyOpen = webhookHistoryOpen,
+                    onHistoryOpenChange = { webhookHistoryOpen = it }
                 )
             }
         }
