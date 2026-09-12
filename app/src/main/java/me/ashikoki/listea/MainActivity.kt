@@ -176,23 +176,139 @@ fun ListeaApp(
         }
     }
 
-    WebhookNoticeDialog(listsViewModel)
+    WebhookDialogs(listsViewModel)
+}
+
+/**
+ * Everything a delivery has to say, in the order it says it: may I, I am, and here is what
+ * happened.
+ *
+ * One host rather than three, and strictly one at a time, because they are three moments of the
+ * same event and stacking two of them would be a lie about what is going on. The order is the
+ * order they occur in, so whichever is showing is always the latest thing that is true.
+ *
+ * Hosted at the top level and above the tabs on purpose. The delivery worth interrupting for is
+ * the one the user was not watching for — a swipe that finished a round, a checkbox that
+ * completed a list — and by the time it happens they may already have navigated somewhere else.
+ */
+@Composable
+private fun WebhookDialogs(viewModel: ListsViewModel) {
+    val confirmation by viewModel.webhookConfirmation.collectAsStateWithLifecycle()
+    val progress by viewModel.webhookProgress.collectAsStateWithLifecycle()
+    val notice by viewModel.webhookNotice.collectAsStateWithLifecycle()
+
+    // Read into locals first: the order below is the order these things happen in, and each arm
+    // needs the value it matched on rather than a nullable field it has to assert about again.
+    val pendingConfirmation = confirmation
+    val pendingProgress = progress
+    val pendingNotice = notice
+
+    when {
+        pendingConfirmation != null -> WebhookConfirmDialog(pendingConfirmation, viewModel)
+        pendingProgress != null -> WebhookProgressDialog(pendingProgress)
+        pendingNotice != null -> WebhookNoticeDialog(pendingNotice, viewModel)
+    }
+}
+
+/**
+ * Asks before an automatic delivery goes out.
+ *
+ * Only deliveries the app decided to make get here — a review being left, a queue running out, a
+ * list going complete. A webhook fired off the back of a swipe was the one thing in Listea that
+ * left the device without anyone asking, which is a lot to hang on a gesture whose whole job is
+ * to be fast.
+ *
+ * Declining is deliberately cheap and the dialog says so: the payload is kept in the history
+ * either way, and nothing about the items — least of all whether they are checked — depends on
+ * the answer. That is what makes *Not now* a real option rather than a way to lose a round of
+ * review.
+ *
+ * Dismissing by tapping outside is treated as declining, for the same reason: the safe reading of
+ * "the user did not answer" is that nothing should leave the device.
+ */
+@Composable
+private fun WebhookConfirmDialog(
+    confirmation: WebhookConfirmation,
+    viewModel: ListsViewModel
+) {
+    AlertDialog(
+        onDismissRequest = { viewModel.declineWebhookSend() },
+        title = { Text("Send this webhook?") },
+        text = {
+            Column {
+                Text(confirmation.listTitle, style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                Text(
+                    confirmation.summaryLabel,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                Text(
+                    "This would post to " + confirmation.destinationLabel +
+                        ". If you do not send it now, it is kept in the webhook history and " +
+                        "nothing about the items changes.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { viewModel.confirmWebhookSend() }) { Text("Send") }
+        },
+        dismissButton = {
+            TextButton(onClick = { viewModel.declineWebhookSend() }) { Text("Not now") }
+        }
+    )
+}
+
+/**
+ * The seconds a payload spends on the wire, which used to look exactly like nothing happening.
+ *
+ * A round can be hundreds of items and a receiver can be slow, so a delivery is not instant and
+ * the user was left looking at a screen that had no way of telling them whether it had already
+ * finished. Shown for every send there is — automatic, the Test button, a resend from the history.
+ *
+ * Deliberately not dismissable and with no buttons. There is nothing useful to do while a POST is
+ * in flight, and a cancel here would leave the honest answer — whether the receiver got it —
+ * unknowable. It goes away by itself the moment the result lands, whatever the result is.
+ */
+@Composable
+private fun WebhookProgressDialog(progress: WebhookProgress) {
+    AlertDialog(
+        onDismissRequest = { },
+        title = { Text("Sending…") },
+        text = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(ListeaDimens.IconSize))
+                Spacer(Modifier.width(ListeaDimens.SectionGap))
+                Column {
+                    Text(progress.listTitle, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        progress.summaryLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = { }
+    )
 }
 
 /**
  * Reports the outcome of every webhook delivery, whichever screen triggered it: a swipe that
  * completed a list in Review, the last checkbox on the detail screen, or the Test button.
  *
- * Hosted at the top level and above the tabs on purpose. The delivery worth announcing is the one
- * the user was not watching for, and this way the result never has to be inferred from a status
- * line on a screen they would have to navigate to. Dismissing or acknowledging clears it; the
- * stored per-list delivery record keeps the detail afterwards.
+ * The result never has to be inferred from a status line on a screen the user would have to
+ * navigate to. Dismissing or acknowledging clears it; the webhook history keeps the payload and
+ * the verdict afterwards, and the stored per-list delivery record keeps the detail.
+ *
+ * A declined delivery deliberately produces nothing here. The user has just pressed *Not now*,
+ * and answering that with a dialog saying it was not sent is telling them what they did.
  */
 @Composable
-private fun WebhookNoticeDialog(viewModel: ListsViewModel) {
-    val notice by viewModel.webhookNotice.collectAsStateWithLifecycle()
-    val current = notice ?: return
-
+private fun WebhookNoticeDialog(current: WebhookNotice, viewModel: ListsViewModel) {
     AlertDialog(
         onDismissRequest = { viewModel.dismissWebhookNotice() },
         title = { Text(current.headline) },
@@ -210,7 +326,8 @@ private fun WebhookNoticeDialog(viewModel: ListsViewModel) {
                         NoticeOutcome.SENT -> MaterialTheme.colorScheme.primary
                         NoticeOutcome.FAILED -> MaterialTheme.colorScheme.error
                         NoticeOutcome.DISABLED,
-                        NoticeOutcome.EMPTY -> MaterialTheme.colorScheme.onSurfaceVariant
+                        NoticeOutcome.EMPTY,
+                        NoticeOutcome.DECLINED -> MaterialTheme.colorScheme.onSurfaceVariant
                     }
                 )
                 Spacer(Modifier.height(ListeaDimens.RowGap))

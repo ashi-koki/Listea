@@ -74,7 +74,17 @@ enum class NoticeOutcome {
      * left once "send checked items only" had its say. Posting `"items": []` would tell a
      * receiver a round happened when none did, so the user is told instead.
      */
-    EMPTY
+    EMPTY,
+
+    /**
+     * Everything was ready and the user said no.
+     *
+     * Only an *automatic* delivery can end this way — one the app decided to make, off the back
+     * of a swipe or a completion, rather than one the user pressed a button for. Those now ask
+     * first, and this is the answer. The payload is kept exactly as a failure's is, so declining
+     * costs nothing: the round is in the history and can be sent from there whenever.
+     */
+    DECLINED
 }
 
 /**
@@ -114,6 +124,7 @@ data class WebhookNotice(
             NoticeOutcome.FAILED -> "Webhook not sent"
             NoticeOutcome.DISABLED -> "Webhook is off"
             NoticeOutcome.EMPTY -> "Nothing to send"
+            NoticeOutcome.DECLINED -> "Not sent"
         }
 
     val eventLabel: String get() = webhookEventLabel(event)
@@ -129,10 +140,71 @@ data class WebhookNotice(
                 "this list's webhook is switched off"
             }
             NoticeOutcome.EMPTY -> "Nothing was sent · there were no items to send"
+            NoticeOutcome.DECLINED -> "Nothing was sent · you chose not to send it"
         }
 
     val timeLabel: String
         get() = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(at))
+}
+
+/**
+ * A delivery that is on the wire right now, for the dialog that says so.
+ *
+ * Exists because a round can be hundreds of items and a receiver can be slow, and the seconds in
+ * between used to look exactly like nothing happening. Everything on it is already known before
+ * the POST starts, so the dialog is complete from the moment it appears rather than filling in.
+ *
+ * Doubles as what an automatic delivery is described by when it asks permission - see
+ * [WebhookConfirmation] - because the question and the progress report are about the same thing
+ * and must not be able to describe it differently.
+ */
+data class WebhookProgress(
+    val event: String,
+    val listTitle: String,
+    val host: String?,
+    val itemCount: Int,
+    val defaultWebhook: Boolean
+) {
+    val eventLabel: String get() = webhookEventLabel(event)
+
+    /** "List completed - 42 items - example.com", the one line under the spinner. */
+    val summaryLabel: String
+        get() = buildList {
+            add(eventLabel)
+            add(countOfItems(itemCount))
+            host?.let { add(it) }
+        }.joinToString(" - ")
+}
+
+/**
+ * An automatic delivery waiting to be allowed.
+ *
+ * Only deliveries the *app* decided to make are ever described by one of these. A webhook fired
+ * off the back of a swipe used to be the one thing in Listea that left the device without anyone
+ * asking, which is a strange amount of trust to place in a gesture whose whole job is to be fast.
+ *
+ * The same fields as [WebhookProgress] and built from it, so the dialog that asks and the dialog
+ * that reports name the same delivery in the same words.
+ */
+data class WebhookConfirmation(
+    val event: String,
+    val listTitle: String,
+    val host: String?,
+    val itemCount: Int,
+    val defaultWebhook: Boolean
+) {
+    val eventLabel: String get() = webhookEventLabel(event)
+
+    val summaryLabel: String
+        get() = buildList {
+            add(eventLabel)
+            add(countOfItems(itemCount))
+            host?.let { add(it) }
+        }.joinToString(" - ")
+
+    /** Which webhook this would go to, since Quick Review's is not the list's own. */
+    val destinationLabel: String
+        get() = if (defaultWebhook) "the default webhook" else "this list's webhook"
 }
 
 /** "1 item" / "42 items", used wherever a payload is sized in front of the user. */

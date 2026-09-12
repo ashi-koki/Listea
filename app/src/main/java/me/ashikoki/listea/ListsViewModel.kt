@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.Mutex
@@ -185,6 +186,16 @@ sealed interface DeleteCheckedRequest {
     data class Error(val message: String) : DeleteCheckedRequest
 }
 
+/**
+ * One automatic delivery held at the confirmation, with the answer it is waiting for.
+ *
+ * A plain class and not a data class on purpose: two identical-looking deliveries are still two
+ * deliveries, and the queue removes entries by identity.
+ */
+private class PendingWebhookSend(val describing: WebhookConfirmation) {
+    val decision = CompletableDeferred<Boolean>()
+}
+
 /** Holds the List screens' state. Talks to the DAO directly; there is no repository layer yet. */
 class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -233,6 +244,31 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     val webhookNotice: StateFlow<WebhookNotice?> = _webhookNotices
         .map { it.firstOrNull() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * Automatic deliveries waiting for the user to say yes, oldest first.
+     *
+     * A queue for the same reason [_webhookNotices] is one: one swipe can reach the end of a
+     * round and complete the list it belongs to, and two questions asked at once must not
+     * overwrite each other. Only one is ever on screen; the next comes up when it is answered.
+     */
+    private val _webhookConfirmations = MutableStateFlow<List<PendingWebhookSend>>(emptyList())
+
+    /** The delivery the user is being asked about, or null when nothing is waiting. */
+    val webhookConfirmation: StateFlow<WebhookConfirmation?> = _webhookConfirmations
+        .map { it.firstOrNull()?.describing }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * The POST currently in flight, or null when none is.
+     *
+     * A single slot rather than a queue: a delivery holds this for exactly as long as it is on
+     * the wire, and nothing else can be posting at the same moment because every send goes
+     * through [post]. What it buys is the seconds a large round spends uploading, which used to
+     * be an empty screen the user could not tell from a finished one.
+     */
+    private val _webhookProgress = MutableStateFlow<WebhookProgress?>(null)
+    val webhookProgress: StateFlow<WebhookProgress?> = _webhookProgress.asStateFlow()
 
     /**
      * Every delivery ever recorded, newest first. Observed rather than fetched so the history
@@ -930,9 +966,15 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         dao.setWebhookUrl(listId, url)
     }
 
-    /** Explicit user action, so it sends regardless of the enabled toggle and never touches state. */
+    /**
+     * Explicit user action, so it sends regardless of the enabled toggle and never touches state.
+     *
+     * The one delivery that does not ask first, along with a resend: pressing a button labelled
+     * *Test webhook* is the confirmation. It still shows the progress dialog, because a test
+     * payload is as big as the list and takes just as long.
+     */
     fun testWebhook(listId: Long) = launchDb {
-        deliver(listId, EVENT_WEBHOOK_TEST, requireEnabled = false)
+        deliver(listId, EVENT_WEBHOOK_TEST, requireEnabled = false, confirm = false)
     }
 
     /**
@@ -993,7 +1035,10 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             event = event,
             requireEnabled = true,
             useDefaultWebhook = true,
-            recordAgainstList = false
+            recordAgainstList = false,
+            // Both callers are automatic - a queue that ran out, or a review being left - so a
+            // folder round always asks, exactly as a List round does.
+            confirm = true
         )
     }
 
@@ -1056,7 +1101,8 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             event = EVENT_REVIEW_EXITED,
             requireEnabled = true,
             queueIds = queueIds,
-            useDefaultWebhook = false
+            useDefaultWebhook = false,
+            confirm = true
         )
     }
 
@@ -1097,7 +1143,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         // always fired independently of any of the review switches, and still does.
         if (insideReviewRound && settingsStore.read().webhookOnReviewExit) return
 
-        deliver(listId, EVENT_LIST_COMPLETED, requireEnabled = true)
+        deliver(listId, EVENT_LIST_COMPLETED, requireEnabled = true, confirm = true)
     }
 
     /**
@@ -1113,13 +1159,17 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
      * Every attempt that reaches a verdict is recorded against the list and announced, including
      * one abandoned over an unusable URL. That an empty default URL fails loudly here is the
      * point: it is the case the user most needs telling about.
+     *
+     * [confirm] is what separates a delivery the app decided to make from one the user pressed a
+     * button for. See [deliverPayload].
      */
     private suspend fun deliver(
         listId: Long,
         event: String,
         requireEnabled: Boolean,
         queueIds: List<Long>? = null,
-        useDefaultWebhook: Boolean = false
+        useDefaultWebhook: Boolean = false,
+        confirm: Boolean
     ) {
         // The whole payload is read in one pass under the ordering lock, so an item write from
         // the swipe that triggered this has certainly landed and the list and its items cannot
@@ -1133,7 +1183,8 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             event = event,
             requireEnabled = requireEnabled,
             useDefaultWebhook = useDefaultWebhook,
-            recordAgainstList = true
+            recordAgainstList = true,
+            confirm = confirm
         )
     }
 
@@ -1152,7 +1203,8 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         event: String,
         requireEnabled: Boolean,
         useDefaultWebhook: Boolean,
-        recordAgainstList: Boolean
+        recordAgainstList: Boolean,
+        confirm: Boolean
     ) {
         val current = settingsStore.read()
         val listId = list.id
@@ -1169,8 +1221,11 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         val enabled = if (useDefaultWebhook) current.defaultWebhookEnabled else list.webhookEnabled
         val url = (if (useDefaultWebhook) current.defaultWebhookUrl else list.webhookUrl).trim()
 
+        fun describe(outcome: NoticeOutcome, itemCount: Int?, httpCode: Int?, error: String?) =
+            noticeOf(list.title, event, url, useDefaultWebhook, itemCount, outcome, httpCode, error)
+
         fun tell(outcome: NoticeOutcome, itemCount: Int?, httpCode: Int?, error: String?) =
-            announce(list.title, event, url, useDefaultWebhook, itemCount, outcome, httpCode, error)
+            raise(describe(outcome, itemCount, httpCode, error))
 
         // Every verdict is kept, in the same words the user was just given, so the history says
         // exactly what the dialog said. Successes included: a history that holds only failures
@@ -1218,7 +1273,30 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val result = withContext(Dispatchers.IO) { postWebhook(url, payload) }
+        val describing = WebhookProgress(
+            event = event,
+            listTitle = list.title,
+            host = webhookHost(url),
+            itemCount = items.size,
+            defaultWebhook = useDefaultWebhook
+        )
+
+        // Everything is settled and something really is about to leave the device - so this is
+        // where an automatic delivery asks. Deliberately after the checks above and not before:
+        // a switched-off webhook or an unusable URL is not a decision to put to the user, and
+        // asking whether to send only to answer that it was off anyway would be theatre.
+        //
+        // Declining is not a failure and costs nothing. The payload is kept exactly as a failed
+        // one is, so a round refused here can still be sent later from the history, and nothing
+        // about the items - least of all whether they are checked - is touched either way. There
+        // is no notice for it: the user just pressed the button, and telling them what they did
+        // is noise.
+        if (confirm && !awaitConfirmation(describing)) {
+            keep(describe(NoticeOutcome.DECLINED, items.size, null, null))
+            return
+        }
+
+        val result = post(describing, url, payload)
         if (recordAgainstList) {
             dao.recordDelivery(listId, now(), result.status.name, result.httpCode, result.error)
         }
@@ -1230,6 +1308,71 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             error = result.error
         )
         keep(notice)
+    }
+
+    /**
+     * Puts one delivery to the user and waits for the answer.
+     *
+     * Suspends the delivery coroutine rather than unwinding it and picking the work up again on
+     * the other side, which is what keeps the confirmation honest: the payload the user is being
+     * asked about is already built and is the exact one that will go, so nothing can change
+     * between the question and the send.
+     *
+     * The `finally` is for the case where nobody ever answers - the screen the delivery came from
+     * going away, or the ViewModel being cleared. [settleConfirmation] has normally removed the
+     * entry already, and removing it twice is a no-op.
+     */
+    private suspend fun awaitConfirmation(describing: WebhookProgress): Boolean {
+        val pending = PendingWebhookSend(
+            describing = WebhookConfirmation(
+                event = describing.event,
+                listTitle = describing.listTitle,
+                host = describing.host,
+                itemCount = describing.itemCount,
+                defaultWebhook = describing.defaultWebhook
+            )
+        )
+        _webhookConfirmations.update { it + pending }
+        return try {
+            pending.decision.await()
+        } finally {
+            _webhookConfirmations.update { queued -> queued.filterNot { it === pending } }
+        }
+    }
+
+    /** The user answered the confirmation on screen. */
+    fun confirmWebhookSend() = settleConfirmation(send = true)
+
+    /** The user declined it. Nothing is sent, and nothing about the items changes. */
+    fun declineWebhookSend() = settleConfirmation(send = false)
+
+    private fun settleConfirmation(send: Boolean) {
+        val head = _webhookConfirmations.value.firstOrNull() ?: return
+        _webhookConfirmations.update { it.drop(1) }
+        head.decision.complete(send)
+    }
+
+    /**
+     * The one place a payload actually leaves the device, and the only thing that publishes
+     * [webhookProgress].
+     *
+     * Every send goes through here - an automatic one, the Test button, a resend from the history
+     * - so "Sending..." appears for all of them and cannot be forgotten by whichever path gets
+     * added next. The clearing is in a `finally` because a POST that throws is still a POST that
+     * finished, and a progress dialog nothing can dismiss would be the worst of the three
+     * outcomes.
+     */
+    private suspend fun post(
+        describing: WebhookProgress,
+        url: String,
+        payload: String
+    ): DeliveryResult {
+        _webhookProgress.value = describing
+        return try {
+            withContext(Dispatchers.IO) { postWebhook(url, payload) }
+        } finally {
+            _webhookProgress.value = null
+        }
     }
 
     /**
@@ -1267,7 +1410,17 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             return@launchDb
         }
 
-        val result = withContext(Dispatchers.IO) { postWebhook(url, record.payload) }
+        val result = post(
+            WebhookProgress(
+                event = record.event,
+                listTitle = record.listTitle,
+                host = webhookHost(url),
+                itemCount = record.itemCount,
+                defaultWebhook = true
+            ),
+            url,
+            record.payload
+        )
         val succeeded = result.status == DeliveryStatus.SUCCESS
         settle(
             tell(
@@ -1316,20 +1469,43 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         outcome: NoticeOutcome,
         httpCode: Int?,
         error: String?
-    ): WebhookNotice {
-        val notice = WebhookNotice(
-            event = event,
-            listTitle = listTitle,
-            // The URL that was actually used, which for Quick Review is the app default rather
-            // than anything on the list.
-            host = webhookHost(url),
-            itemCount = itemCount,
-            outcome = outcome,
-            httpCode = httpCode,
-            error = error,
-            defaultWebhook = defaultWebhook,
-            at = now()
-        )
+    ): WebhookNotice = raise(
+        noticeOf(listTitle, event, url, defaultWebhook, itemCount, outcome, httpCode, error)
+    )
+
+    /**
+     * The same result, described but not shown.
+     *
+     * Split out from [announce] for the one outcome that must be recorded without being reported:
+     * a delivery the user has just declined. The history still gets it, in exactly the words
+     * every other outcome is kept in, but putting a dialog on screen to tell someone what they
+     * did a moment ago is noise.
+     */
+    private fun noticeOf(
+        listTitle: String,
+        event: String,
+        url: String,
+        defaultWebhook: Boolean,
+        itemCount: Int?,
+        outcome: NoticeOutcome,
+        httpCode: Int?,
+        error: String?
+    ): WebhookNotice = WebhookNotice(
+        event = event,
+        listTitle = listTitle,
+        // The URL that was actually used, which for Quick Review is the app default rather
+        // than anything on the list.
+        host = webhookHost(url),
+        itemCount = itemCount,
+        outcome = outcome,
+        httpCode = httpCode,
+        error = error,
+        defaultWebhook = defaultWebhook,
+        at = now()
+    )
+
+    /** Queues one for acknowledgement, collapsed against what is already waiting, and returns it. */
+    private fun raise(notice: WebhookNotice): WebhookNotice {
         _webhookNotices.update { queued ->
             if (notice.addsTo(queued)) queued + notice else queued
         }
