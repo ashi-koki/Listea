@@ -13,3 +13,10 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Release signing. A keystore and its passwords are credentials, not source, and losing
+# control of them means losing control of app updates. Listed before one exists so the
+# mistake cannot be made in the first place.
+*.jks
+*.keystore
+keystore.properties
