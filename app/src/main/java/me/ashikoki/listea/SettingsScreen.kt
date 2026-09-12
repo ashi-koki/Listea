@@ -11,11 +11,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -60,7 +57,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -495,6 +491,33 @@ fun SettingsScreen(
                     "list's own are kept, so turning it on to sweep through a root and turning " +
                     "it back off returns each of them to what it had."
             )
+
+            HorizontalDivider(Modifier.padding(top = ListeaDimens.CompactGap))
+
+            SwitchRow(
+                label = "Ask to delete after webhook",
+                icon = Icons.Outlined.DeleteOutline,
+                checked = settings.askDeleteAfterWebhook,
+                onCheckedChange = { viewModel.setAskDeleteAfterWebhook(it) }
+            )
+            HelperText(
+                "Once a webhook has been sent, Listea offers to delete the files that delivery " +
+                    "carried as checked. Every one of them is named first and nothing is " +
+                    "deleted until you confirm."
+            )
+            HelperText(
+                "The offer follows the webhook, not the review. \"Review unchecked items only\" " +
+                    "decides what the round walked and \"Send checked items only\" decides what " +
+                    "the payload carried — both have already had their say by the time you are " +
+                    "asked, and what is offered is exactly the checked items in the payload " +
+                    "that went out. Nothing else under the root is touched."
+            )
+            HelperText(
+                "A webhook that did not go out deletes nothing. You are told the files are " +
+                    "still there, and the round stays in Webhook history above to be resent — " +
+                    "or you can clear the checked files here instead."
+            )
+
             Spacer(Modifier.height(ListeaDimens.RowGap))
 
             InfoActionsRow(
@@ -547,9 +570,10 @@ fun SettingsScreen(
             )
             HelperText(
                 "Deletes every checked file in the current root folder from the device itself, " +
-                    "permanently. You are shown the full list first and nothing happens until you " +
-                    "confirm. The items stay in their Lists, marked as missing, so what you " +
-                    "decided about them is kept."
+                    "permanently — however and whenever it was checked, which is what makes it " +
+                    "wider than the offer above. You are shown the full list first and nothing " +
+                    "happens until you confirm. The items stay in their Lists, marked as " +
+                    "missing, so what you decided about them is kept."
             )
             HelperText(
                 "Files are deleted where Listea last recorded them, so update a List from its " +
@@ -789,11 +813,11 @@ private fun DeleteCheckedFilesDialog(
 }
 
 /**
- * Every file that would go, as folder-then-files, in a box of its own that scrolls.
+ * What the whole-root deletion is about to take, said once and then listed in full.
  *
- * Lazy because the list is as long as the user's review has been: a folder library can put
- * thousands of names in here, and composing all of them to show the first twenty would stall the
- * dialog exactly when it must not. Monospace so a run of similar filenames stays scannable.
+ * The sentence is this dialog's own — it is the one that deletes every checked file under the
+ * root, whenever it was checked — and the listing under it is [CheckedFileGroups], shared with
+ * the offer a delivered webhook makes.
  */
 @Composable
 private fun CheckedFileListing(pending: DeleteCheckedRequest.Confirm, rootLabel: String) {
@@ -803,33 +827,9 @@ private fun CheckedFileListing(pending: DeleteCheckedRequest.Confirm, rootLabel:
                 "permanently. This cannot be undone."
         )
         Spacer(Modifier.height(ListeaDimens.RowGap))
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = ListingMaxHeight),
-            verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
-        ) {
-            items(pending.groups, key = { it.folderPath }) { group ->
-                Column {
-                    Text(
-                        group.folderPath.ifEmpty { rootLabel },
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    Text(
-                        group.filesLine,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
+        CheckedFileGroups(groups = pending.groups, rootLabel = rootLabel)
     }
 }
-
-/** Tall enough to be worth scrolling, short enough that the dialog stays a dialog. */
-private val ListingMaxHeight = 320.dp
 
 /**
  * One custom action's two fields: what it is called, and what it sends.

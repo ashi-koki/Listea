@@ -188,6 +188,58 @@ sealed interface DeleteCheckedRequest {
 }
 
 /**
+ * The offer made after a webhook has gone out, when
+ * [AppSettings.askDeleteAfterWebhook] is on.
+ *
+ * A second state machine rather than a reuse of [DeleteCheckedRequest], because the two answer
+ * different questions with different scopes. That one starts from the root folder and gathers
+ * every checked file under it, whenever it was checked; this one starts from a payload that has
+ * just been accepted by a receiver and covers exactly the files that payload carried as checked.
+ * The two will disagree the moment anything was checked outside the round, and folding them
+ * together would mean one dialog quietly acting on the other's set.
+ *
+ * Nothing here is offered until the delivery has already been reported. The round's own result
+ * comes first and this follows it, so the user is never asked whether to delete files without
+ * having just been told whether the thing that justifies deleting them actually worked.
+ */
+sealed interface PostWebhookDeletion {
+    /**
+     * The delivery succeeded and these are the files it carried as checked. [fileCount] counts
+     * files; [groups] is the same set arranged for reading.
+     */
+    data class Ask(
+        val listTitle: String,
+        val eventLabel: String,
+        val groups: List<CheckedFileGroup>,
+        val fileCount: Int
+    ) : PostWebhookDeletion
+
+    /**
+     * The delivery did not go out, so there is nothing to offer — only something to say.
+     *
+     * Its own state rather than a silence, because the switch being on is the user saying they
+     * expect to be asked about these files, and a round that fails is exactly when they need to
+     * know that the files are still there and where the round went instead.
+     */
+    data class NotSent(
+        val listTitle: String,
+        val fileCount: Int,
+        val detail: String
+    ) : PostWebhookDeletion
+
+    /** The root can be read but not changed, which only Settings can do anything about. */
+    data class NeedsWriteAccess(val fileCount: Int) : PostWebhookDeletion
+
+    data object Deleting : PostWebhookDeletion
+
+    /** [failed] is files the provider would not remove; they are still on the device. */
+    data class Done(val deleted: Int, val failed: Int) : PostWebhookDeletion
+
+    data class Error(val message: String) : PostWebhookDeletion
+}
+
+/** Holds the List screens' state. Talks to the DAO directly; there is no repository layer yet. */
+/**
  * One automatic delivery held at the confirmation, with the answer it is waiting for.
  *
  * A plain class and not a data class on purpose: two identical-looking deliveries are still two
@@ -197,7 +249,25 @@ private class PendingWebhookSend(val describing: WebhookConfirmation) {
     val decision = CompletableDeferred<Boolean>()
 }
 
-/** Holds the List screens' state. Talks to the DAO directly; there is no repository layer yet. */
+/**
+ * What one run of the file deletion actually achieved, for whichever dialog asked for it.
+ *
+ * [recordFailed] is deliberately separate from [failed]: the files are gone either way, and the
+ * two are different things to have to tell someone. One says a file is still on the device; the
+ * other says it is not, but Listea's own rows have not caught up.
+ */
+private class FileDeletionOutcome(
+    val deleted: Int,
+    val failed: Int,
+    val recordFailed: Boolean
+)
+
+/** What a deletion that worked but could not be filed away has to admit to. Shared, so both
+ * dialogs admit to it in the same words. */
+private const val DeletionNotRecordedMessage =
+    "The files were deleted, but Listea could not record that. Use \"Update from folder\" on " +
+        "the Lists they came from."
+
 class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
     private val dao = ListeaDatabase.get(application).listsDao()
@@ -299,6 +369,17 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     val deleteCheckedRequest: StateFlow<DeleteCheckedRequest?> = _deleteCheckedRequest.asStateFlow()
 
     /**
+     * What a delivered webhook is offering to clean up, or null when nothing is.
+     *
+     * A single slot and not a queue, unlike the notices: two rounds cannot be delivered at once
+     * — every send goes through the one [post] — and by the time a second could arrive the first
+     * offer has been answered or dismissed. Hosted above the tabs, because the round that
+     * triggered it may have been left behind by then.
+     */
+    private val _postWebhookDeletion = MutableStateFlow<PostWebhookDeletion?>(null)
+    val postWebhookDeletion: StateFlow<PostWebhookDeletion?> = _postWebhookDeletion.asStateFlow()
+
+    /**
      * Orders item writes against the payload reads that follow them.
      *
      * A review's last swipe checks an item and then asks for a delivery, as two separate calls
@@ -337,6 +418,16 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The exact files the confirmation dialog is describing, held until it is answered. */
     private var pendingDeletion: List<String> = emptyList()
+
+    /**
+     * The same, for the offer a delivered webhook makes, with the root its paths are relative to.
+     *
+     * Held apart from [pendingDeletion] because the two dialogs can genuinely both be waiting:
+     * a round can finish while Settings is open behind it, and an answer to one must never be
+     * able to act on the other's files.
+     */
+    private var pendingSentDeletion: List<String> = emptyList()
+    private var pendingSentDeletionRoot: String? = null
 
     private data class PendingResync(val listId: Long, val files: List<ScannedFile>)
 
@@ -539,31 +630,133 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         pendingDeletion = emptyList()
         _deleteCheckedRequest.value = DeleteCheckedRequest.Deleting
 
+        val outcome = runFileDeletion(rootUri, paths)
+        _deleteCheckedRequest.value = if (outcome.recordFailed) {
+            // The files are gone either way; what failed is the bookkeeping, and saying so is
+            // better than a success message in front of items that still claim to have a file.
+            DeleteCheckedRequest.Error(DeletionNotRecordedMessage)
+        } else {
+            DeleteCheckedRequest.Done(deleted = outcome.deleted, failed = outcome.failed)
+        }
+    }
+
+    /**
+     * The permanent part itself, shared by the two dialogs that can reach it.
+     *
+     * Only the files that genuinely went are recorded as gone, and recorded as *missing* rather
+     * than erased: the decision about a file outlives the file, so a List whose files were
+     * deleted stays complete and says its sources are missing, exactly as it would after a
+     * re-sync.
+     */
+    private suspend fun runFileDeletion(
+        rootUri: String,
+        paths: List<String>
+    ): FileDeletionOutcome {
         val result = withContext(Dispatchers.IO) {
             deleteCheckedFiles(getApplication(), rootUri.toUri(), paths)
         }
         val recorded = runCatching {
             writeOrder.withLock { dao.markFilesDeleted(rootUri, result.deletedPaths) }
         }
-
-        _deleteCheckedRequest.value = if (recorded.isFailure) {
-            // The files are gone either way; what failed is the bookkeeping, and saying so is
-            // better than a success message in front of items that still claim to have a file.
-            DeleteCheckedRequest.Error(
-                "The files were deleted, but Listea could not record that. Use \"Update from " +
-                    "folder\" on the Lists they came from."
-            )
-        } else {
-            DeleteCheckedRequest.Done(
-                deleted = result.deletedPaths.size,
-                failed = result.failedCount
-            )
-        }
+        return FileDeletionOutcome(
+            deleted = result.deletedPaths.size,
+            failed = result.failedCount,
+            recordFailed = recorded.isFailure
+        )
     }
 
     fun dismissDeleteCheckedRequest() {
         pendingDeletion = emptyList()
         _deleteCheckedRequest.value = null
+    }
+
+    /**
+     * What a webhook that has just been reported leaves behind, when the user has asked to be
+     * offered it.
+     *
+     * The set is taken from [items] — the payload's own items, as they were sent — and narrowed
+     * once, to the checked ones that still have a file. That is the whole semantics of the
+     * feature: whatever the review queued and whatever the payload filter kept, the files offered
+     * here are exactly the ones the receiver was just told are checked. Nothing is re-read from
+     * the database, because a file checked between the send and this moment was not part of what
+     * was sent.
+     *
+     * A delivery that failed is reported rather than acted on. The round is in the webhook
+     * history and can be sent again from Settings, and deleting the files it described before
+     * anybody has received it would destroy the only copy of what the round was about.
+     *
+     * Silent when the switch is off, when the payload came from a list with no source folder — a
+     * manual list has no files to delete — and when nothing in it was both checked and still on
+     * the device, because an offer to delete nothing is a dialog that only costs a tap.
+     */
+    private suspend fun offerPostWebhookDeletion(
+        settings: AppSettings,
+        list: ListEntity,
+        items: List<ListItemEntity>,
+        notice: WebhookNotice
+    ) {
+        if (!settings.askDeleteAfterWebhook) return
+        val rootUri = list.sourceRootUri ?: return
+        val paths = sentCheckedFilePaths(items)
+        if (paths.isEmpty()) return
+
+        if (!notice.succeeded) {
+            _postWebhookDeletion.value = PostWebhookDeletion.NotSent(
+                listTitle = list.title,
+                fileCount = paths.size,
+                detail = notice.outcomeLabel
+            )
+            return
+        }
+
+        // Checked before the offer rather than after it, for the same reason the Settings flow
+        // checks it before listing: being asked to confirm a deletion that was never permitted
+        // is worse than being told up front that it is not.
+        val writable = withContext(Dispatchers.IO) {
+            hasPersistedWriteAccess(getApplication(), rootUri.toUri())
+        }
+        if (!writable) {
+            _postWebhookDeletion.value = PostWebhookDeletion.NeedsWriteAccess(paths.size)
+            return
+        }
+
+        pendingSentDeletion = paths
+        pendingSentDeletionRoot = rootUri
+        _postWebhookDeletion.value = PostWebhookDeletion.Ask(
+            listTitle = list.title,
+            eventLabel = webhookEventLabel(notice.event),
+            groups = withContext(Dispatchers.Default) { groupCheckedFiles(paths) },
+            fileCount = paths.size
+        )
+    }
+
+    /**
+     * The user accepted the offer. Deletes exactly the files it listed and nothing it did not.
+     */
+    fun confirmPostWebhookDeletion() = launchDb {
+        val paths = pendingSentDeletion
+        val rootUri = pendingSentDeletionRoot
+        if (paths.isEmpty() || rootUri == null) return@launchDb
+        pendingSentDeletion = emptyList()
+        pendingSentDeletionRoot = null
+        _postWebhookDeletion.value = PostWebhookDeletion.Deleting
+
+        val outcome = runFileDeletion(rootUri, paths)
+        _postWebhookDeletion.value = if (outcome.recordFailed) {
+            PostWebhookDeletion.Error(DeletionNotRecordedMessage)
+        } else {
+            PostWebhookDeletion.Done(deleted = outcome.deleted, failed = outcome.failed)
+        }
+    }
+
+    /**
+     * The user declined it, or acknowledged the outcome. Declining costs nothing: the files stay
+     * where they are and Settings can still delete every checked file under the root later.
+     */
+    fun dismissPostWebhookDeletion() {
+        pendingSentDeletion = emptyList()
+        pendingSentDeletionRoot = null
+        _postWebhookDeletion.value = null
     }
 
     fun addItem(listId: Long, title: String) = edit(title) { clean ->
@@ -931,6 +1124,10 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setWebhookOnReviewExit(enabled: Boolean) = launchDb {
         settingsStore.setWebhookOnReviewExit(enabled)
+    }
+
+    fun setAskDeleteAfterWebhook(enabled: Boolean) = launchDb {
+        settingsStore.setAskDeleteAfterWebhook(enabled)
     }
 
     fun setSharedFileArrangement(shared: Boolean) = launchDb {
@@ -1308,6 +1505,14 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             error = result.error
         )
         keep(notice)
+
+        // What the round leaves on the device, once the round itself has been reported.
+        //
+        // Only for a delivery the app decided to make, which is the same test [confirm] already
+        // stands for: the Test button sends a list the user is looking at rather than a round
+        // they just finished, and offering to delete its files off the back of a button labelled
+        // *Test* would be indefensible. A resend never reaches here at all.
+        if (confirm) offerPostWebhookDeletion(current, list, items, notice)
     }
 
     /**

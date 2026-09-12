@@ -190,23 +190,30 @@ fun ListeaApp(
  * Hosted at the top level and above the tabs on purpose. The delivery worth interrupting for is
  * the one the user was not watching for — a swipe that finished a round, a checkbox that
  * completed a list — and by the time it happens they may already have navigated somewhere else.
+ *
+ * The clean-up offer is a fourth moment and comes strictly last, after the result has been
+ * acknowledged. Being asked whether to delete a round's files before being told whether the round
+ * was delivered would be asking the question backwards.
  */
 @Composable
 private fun WebhookDialogs(viewModel: ListsViewModel) {
     val confirmation by viewModel.webhookConfirmation.collectAsStateWithLifecycle()
     val progress by viewModel.webhookProgress.collectAsStateWithLifecycle()
     val notice by viewModel.webhookNotice.collectAsStateWithLifecycle()
+    val deletion by viewModel.postWebhookDeletion.collectAsStateWithLifecycle()
 
     // Read into locals first: the order below is the order these things happen in, and each arm
     // needs the value it matched on rather than a nullable field it has to assert about again.
     val pendingConfirmation = confirmation
     val pendingProgress = progress
     val pendingNotice = notice
+    val pendingDeletion = deletion
 
     when {
         pendingConfirmation != null -> WebhookConfirmDialog(pendingConfirmation, viewModel)
         pendingProgress != null -> WebhookProgressDialog(pendingProgress)
         pendingNotice != null -> WebhookNoticeDialog(pendingNotice, viewModel)
+        pendingDeletion != null -> PostWebhookDeleteDialog(pendingDeletion, viewModel)
     }
 }
 
@@ -345,6 +352,126 @@ private fun WebhookNoticeDialog(current: WebhookNotice, viewModel: ListsViewMode
         },
         confirmButton = {
             TextButton(onClick = { viewModel.dismissWebhookNotice() }) { Text("OK") }
+        }
+    )
+}
+
+/**
+ * The offer a delivered webhook makes: the files that round just reported as checked are still on
+ * the device — should they stay there?
+ *
+ * Only ever seen with *Ask to delete after webhook* switched on, and only after the delivery's own
+ * result has been acknowledged. What it names is exactly what the payload carried as checked:
+ * whatever the review queued, and whatever "send checked items only" then kept, has already had
+ * its say by the time this appears, and the offer is bounded by the delivery rather than by the
+ * root folder. That is the difference between this and Settings' own *Delete checked files*,
+ * which covers every checked file under the root however and whenever it was checked — so the
+ * dialog says which it is rather than leaving the two to be confused.
+ *
+ * Keeping is the easy path, everywhere it can be: dismissing counts as keeping, the delete button
+ * is the one that has to be aimed for, and nothing here can be reached at all unless a receiver
+ * has already accepted the round. While the deletion runs there is no way out, because there is
+ * nothing left to decide.
+ *
+ * A delivery that failed reaches [PostWebhookDeletion.NotSent] instead and offers nothing. The
+ * files stay, and the dialog says where the round went — the webhook history, which is also where
+ * it is resent from — rather than quietly dropping the subject.
+ */
+@Composable
+private fun PostWebhookDeleteDialog(
+    pending: PostWebhookDeletion,
+    viewModel: ListsViewModel
+) {
+    val dismiss = { viewModel.dismissPostWebhookDeletion() }
+
+    AlertDialog(
+        onDismissRequest = { if (pending !is PostWebhookDeletion.Deleting) dismiss() },
+        title = {
+            Text(
+                when (pending) {
+                    is PostWebhookDeletion.Ask -> "Delete the files that were sent?"
+                    is PostWebhookDeletion.NotSent -> "Nothing was deleted"
+                    is PostWebhookDeletion.NeedsWriteAccess -> "Listea cannot delete these yet"
+                    PostWebhookDeletion.Deleting -> "Deleting"
+                    is PostWebhookDeletion.Done -> "Finished"
+                    is PostWebhookDeletion.Error -> "Deleted, but not recorded"
+                }
+            )
+        },
+        text = {
+            when (pending) {
+                is PostWebhookDeletion.Ask -> Column {
+                    Text(pending.listTitle, style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        "${pending.eventLabel} sent " +
+                            "${countLabel(pending.fileCount, "checked file")}. Deleting removes " +
+                            "exactly those files from the device, permanently — not every " +
+                            "checked file under the root folder, and nothing this webhook did " +
+                            "not carry."
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    CheckedFileGroups(
+                        groups = pending.groups,
+                        rootLabel = "Selected folder"
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        "The items stay in their Lists, marked as missing, so what you decided " +
+                            "about them is kept.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                is PostWebhookDeletion.NotSent -> Column {
+                    Text(pending.listTitle, style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        pending.detail,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        "${countLabel(pending.fileCount, "checked file")} stayed on the device, " +
+                            "because nothing has received them yet. The round is kept in " +
+                            "Settings › Webhook history — resend it from there, or delete the " +
+                            "checked files yourself from Settings › File management."
+                    )
+                }
+
+                is PostWebhookDeletion.NeedsWriteAccess -> Text(
+                    "The webhook carried ${countLabel(pending.fileCount, "checked file")}, but " +
+                        "Listea is only allowed to read the source folder, so it cannot offer to " +
+                        "delete anything. Android hands over permission to delete through its " +
+                        "own folder picker, which Settings › File management will take you to."
+                )
+
+                PostWebhookDeletion.Deleting -> Text("Removing the files from the device…")
+
+                is PostWebhookDeletion.Done ->
+                    Text(deleteOutcomeMessage(pending.deleted, pending.failed))
+
+                is PostWebhookDeletion.Error -> Text(pending.message)
+            }
+        },
+        confirmButton = {
+            when (pending) {
+                is PostWebhookDeletion.Ask -> TextButton(
+                    onClick = { viewModel.confirmPostWebhookDeletion() }
+                ) {
+                    Text("Delete permanently", color = MaterialTheme.colorScheme.error)
+                }
+                // Nothing to offer mid-run: the files are already going.
+                PostWebhookDeletion.Deleting -> Unit
+                else -> TextButton(onClick = dismiss) { Text("Close") }
+            }
+        },
+        dismissButton = {
+            if (pending is PostWebhookDeletion.Ask) {
+                TextButton(onClick = dismiss) { Text("Keep them") }
+            }
         }
     )
 }

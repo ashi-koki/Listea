@@ -14,6 +14,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -27,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -244,3 +248,54 @@ fun InfoActionsRow(
         }
     }
 }
+
+/**
+ * Every file a deletion would take, as folder-then-files, in a box of its own that scrolls.
+ *
+ * Shared by the two dialogs that can delete files: the one Settings offers over the whole root,
+ * and the one a delivered webhook offers over the round it just sent. They ask different
+ * questions about different sets and each says so in its own words above this — but what is at
+ * stake is a list of filenames either way, and the two must not be able to present that list
+ * differently.
+ *
+ * The listing is the point of both dialogs. "Delete 84 files" is not something anyone can agree
+ * to honestly, so every file is named, under the folder that holds it, and the whole thing
+ * scrolls — nothing is summarised away with "and 79 more", because the 79 are exactly what is at
+ * stake. Grouping by folder keeps that readable at the length it can reach.
+ *
+ * Lazy because the list is as long as the user's review has been: a folder library can put
+ * thousands of names in here, and composing all of them to show the first twenty would stall the
+ * dialog exactly when it must not. Monospace so a run of similar filenames stays scannable.
+ */
+@Composable
+fun CheckedFileGroups(
+    groups: List<CheckedFileGroup>,
+    rootLabel: String,
+    modifier: Modifier = Modifier
+) {
+    LazyColumn(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = CheckedListingMaxHeight),
+        verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+    ) {
+        items(groups, key = { it.folderPath }) { group ->
+            Column {
+                Text(
+                    group.folderPath.ifEmpty { rootLabel },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    group.filesLine,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/** Tall enough to be worth scrolling, short enough that the dialog stays a dialog. */
+private val CheckedListingMaxHeight = 320.dp

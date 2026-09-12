@@ -3,6 +3,7 @@ package me.ashikoki.listea
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import me.ashikoki.listea.data.ListItemEntity
 
 /**
  * Acting on the files themselves, rather than on the Lists that describe them.
@@ -125,3 +126,22 @@ fun deleteOutcomeMessage(deleted: Int, failed: Int): String {
     }
     return "$gone from the device. $kept."
 }
+
+/**
+ * The files a delivered payload is entitled to offer for deletion: the checked ones that still
+ * have a file behind them.
+ *
+ * The input is the payload's own items, already narrowed by whatever
+ * [AppSettings.webhookCompletedItemsOnly] and the review's own queue had to say, so this adds
+ * exactly one rule and no others — a payload item that is not checked was reported to the
+ * receiver as not checked, and deleting it would act on a decision nobody made.
+ *
+ * A manual item has no file, and one whose source has gone missing has a path that resolves to
+ * nothing; both drop out rather than being counted towards a total that could never be reached.
+ * Duplicates are collapsed because the same file can sit in more than one list, and a path offered
+ * twice would be a file deleted once and reported as failing the second time.
+ */
+fun sentCheckedFilePaths(items: List<ListItemEntity>): List<String> = items
+    .filter { it.isCompleted && !it.sourceMissing }
+    .mapNotNull { it.rootRelativePath?.takeIf(String::isNotEmpty) }
+    .distinct()

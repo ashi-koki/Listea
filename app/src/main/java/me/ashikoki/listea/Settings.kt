@@ -120,6 +120,27 @@ data class AppSettings(
     val sharedFileArrangement: Boolean = true,
 
     /**
+     * Whether a webhook that went out is followed by an offer to delete the files it carried as
+     * checked.
+     *
+     * Deliberately worded around the *webhook* rather than around the review, because that is
+     * exactly what it acts on: the files offered are the checked ones in the payload that was
+     * just sent, and nothing else. Every other switch here has already had its say by then —
+     * [reviewUncheckedOnly] decided what the round walked, [webhookCompletedItemsOnly] decided
+     * what the payload carried — so this one never needs to reason about them, and the offer
+     * never covers a file the delivery did not.
+     *
+     * Only a delivery that actually succeeded leads to the offer. One that failed leaves every
+     * file where it is and says so: the round can still be resent from the webhook history, and
+     * deleting the files it described would be deleting the evidence of a round nobody has
+     * received.
+     *
+     * Off by default. It is the only switch in the app whose "yes" destroys something outside
+     * Listea's own database, and it is one confirmation away from doing it right after a swipe.
+     */
+    val askDeleteAfterWebhook: Boolean = false,
+
+    /**
      * Whether leaving a review delivers a webhook for the queue that was just reviewed.
      *
      * Full Review uses the list's own webhook configuration, exactly as its completion does;
@@ -292,6 +313,8 @@ class SettingsStore(context: Context) {
                     ?: defaults.reviewUncheckedOnly,
                 webhookOnReviewExit = prefs[KEY_WEBHOOK_ON_REVIEW_EXIT]
                     ?: defaults.webhookOnReviewExit,
+                askDeleteAfterWebhook = prefs[KEY_ASK_DELETE_AFTER_WEBHOOK]
+                    ?: defaults.askDeleteAfterWebhook,
                 sharedFileArrangement = prefs[KEY_SHARED_ARRANGEMENT]
                     ?: defaults.sharedFileArrangement
             )
@@ -394,6 +417,9 @@ class SettingsStore(context: Context) {
     suspend fun setWebhookOnReviewExit(enabled: Boolean) =
         put { it[KEY_WEBHOOK_ON_REVIEW_EXIT] = enabled }
 
+    suspend fun setAskDeleteAfterWebhook(enabled: Boolean) =
+        put { it[KEY_ASK_DELETE_AFTER_WEBHOOK] = enabled }
+
     suspend fun setSharedFileArrangement(shared: Boolean) =
         put { it[KEY_SHARED_ARRANGEMENT] = shared }
 
@@ -462,6 +488,7 @@ class SettingsStore(context: Context) {
         val KEY_COMPLETED_ITEMS_ONLY = booleanPreferencesKey("webhook_completed_items_only")
         val KEY_REVIEW_UNCHECKED_ONLY = booleanPreferencesKey("review_unchecked_only")
         val KEY_WEBHOOK_ON_REVIEW_EXIT = booleanPreferencesKey("webhook_on_review_exit")
+        val KEY_ASK_DELETE_AFTER_WEBHOOK = booleanPreferencesKey("ask_delete_after_webhook")
         val KEY_SHARED_ARRANGEMENT = booleanPreferencesKey("shared_file_arrangement")
         val KEY_GLOBAL_ARRANGEMENT = stringPreferencesKey("global_file_arrangement")
         val KEY_FOLDER_ARRANGEMENTS = stringPreferencesKey("folder_file_arrangements")
