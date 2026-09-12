@@ -52,6 +52,16 @@ data class ListEntity(
 )
 data class ListItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+
+    /**
+     * What this item is called outside Listea — on the webhook and in whatever the webhook feeds.
+     *
+     * Assigned once, when the row is created, and never rewritten. [id] stays what it always was:
+     * a local handle for foreign keys, resume positions and queue lookups, which is all a
+     * sequence number is any good for. See [newItemPublicId] for what this is made of and why the
+     * two are not the same thing.
+     */
+    val publicId: String,
     val listId: Long,
     val title: String,
     /**
@@ -140,6 +150,14 @@ data class ListItemEntity(
 )
 data class FileReviewStateEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+
+    /**
+     * The webhook-facing name for this file's registration, exactly as [ListItemEntity.publicId]
+     * is for a list row — and the reason both tables carry one. A folder Quick Review has no list
+     * rows to send, so it sends these; before they existed the two tables' sequence numbers went
+     * out under the same field name and a receiver had no way to tell which space an id came from.
+     */
+    val publicId: String,
     val rootUri: String,
     val relativePath: String,
     val isCompleted: Boolean = false,
@@ -220,9 +238,15 @@ sealed interface DecisionTarget {
  * id for a folder review. It is never a cross-mode identity, and nothing persists it except a
  * List's own resume position, which only List review has. What is shared across modes is
  * [target], and that is a path, not an id.
+ *
+ * [publicId] is the opposite of that in every respect: it comes off the stored row either mode
+ * resolved, it means the same thing across both, and it is the only one of the two a receiver
+ * ever sees. Carried here because a folder round's payload is built from these items and has no
+ * list rows to read it off instead.
  */
 data class ReviewItem(
     val id: Long,
+    val publicId: String,
     val title: String,
     val sourceUri: String?,
 
@@ -262,6 +286,7 @@ data class ReviewItem(
  */
 fun ListItemEntity.toReviewItem(rootUri: String?): ReviewItem = ReviewItem(
     id = id,
+    publicId = publicId,
     title = title,
     sourceUri = sourceUri,
     relativePath = sourceRelativePath,

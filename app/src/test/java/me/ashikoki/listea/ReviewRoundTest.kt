@@ -1,7 +1,9 @@
 package me.ashikoki.listea
 
 import me.ashikoki.listea.data.DecisionTarget
+import me.ashikoki.listea.data.fileIdentity
 import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.newItemPublicId
 import me.ashikoki.listea.data.ReviewDecisions
 import me.ashikoki.listea.data.ReviewItem
 import org.junit.Assert.assertEquals
@@ -27,6 +29,7 @@ class ReviewRoundTest {
         val id = nextId++
         return ReviewItem(
             id = id,
+            publicId = newItemPublicId(fileIdentity("folder/item$id.jpg"), now = id),
             title = "item $id",
             sourceUri = "content://tree/doc/$id",
             relativePath = "item$id.jpg",
@@ -50,6 +53,7 @@ class ReviewRoundTest {
     /** The stored row a queued item resolves back to when its payload is built. */
     private fun row(item: ReviewItem) = ListItemEntity(
         id = item.id,
+        publicId = item.publicId,
         listId = 1,
         title = item.title,
         isCompleted = item.decisions.isCompleted,

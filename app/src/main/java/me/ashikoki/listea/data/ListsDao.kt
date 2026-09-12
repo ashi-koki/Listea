@@ -53,6 +53,7 @@ abstract class ListsDao {
     @Query(
         """
         SELECT i.id AS id,
+               i.publicId AS publicId,
                i.listId AS listId,
                i.title AS title,
                CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted ELSE COALESCE(s.isCompleted, 0) END AS isCompleted,
@@ -109,6 +110,7 @@ abstract class ListsDao {
         val wasComplete = isComplete(listId) == true
         insertItem(
             ListItemEntity(
+                publicId = newItemPublicId(manualItemIdentity(listId, title), now),
                 listId = listId,
                 title = title,
                 sortOrder = maxSortOrder(listId) + 1,
@@ -275,6 +277,13 @@ abstract class ListsDao {
         insertItems(
             files.mapIndexed { index, file ->
                 ListItemEntity(
+                    // Its name downstream, fixed now. A second list built over this same folder
+                    // later gives the same file a different one, on purpose: they are two
+                    // arrivals of it, and a receiver must be able to hold both.
+                    publicId = newItemPublicId(
+                        fileIdentity(rootRelativePathOf(relativePath, file.relativePath)),
+                        now
+                    ),
                     listId = listId,
                     title = file.name,
                     sortOrder = index,
@@ -298,6 +307,7 @@ abstract class ListsDao {
     @Query(
         """
         SELECT i.id AS id,
+               i.publicId AS publicId,
                i.listId AS listId,
                i.title AS title,
                CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted ELSE COALESCE(s.isCompleted, 0) END AS isCompleted,
@@ -459,6 +469,10 @@ abstract class ListsDao {
             diff.addedPaths.mapIndexedNotNull { index, path ->
                 val file = files.firstOrNull { it.relativePath == path } ?: return@mapIndexedNotNull null
                 ListItemEntity(
+                    publicId = newItemPublicId(
+                        fileIdentity(rootRelativePathOf(listPath, file.relativePath)),
+                        now
+                    ),
                     listId = listId,
                     title = file.name,
                     sortOrder = appendFrom + index,
@@ -586,6 +600,7 @@ abstract class ListsDao {
         if (existing == null) {
             insertFileState(
                 FileReviewStateEntity(
+                    publicId = newItemPublicId(fileIdentity(relativePath), now),
                     rootUri = rootUri,
                     relativePath = relativePath,
                     isCompleted = next.isCompleted,

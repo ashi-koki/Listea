@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.execSQL
 
 @Database(
@@ -15,7 +16,7 @@ import androidx.sqlite.execSQL
         UnsentWebhookEntity::class,
         FileReviewStateEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -189,6 +190,94 @@ abstract class ListeaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * V10 gives every item a public id, which is what the webhook now sends in place of the
+         * row's sequence number. See [newItemPublicId] for the shape and the reasons.
+         *
+         * Additive columns, then a backfill, because an id has to exist for rows that were
+         * written before the scheme did: a list built last month must keep working, and a
+         * delivery that found an empty id would be worse than one that never had a good one.
+         *
+         * The backfill runs in Kotlin rather than SQL — the id is a base32 encoding over a hash,
+         * and SQLite can do neither — so each row is read, given an id built from what it already
+         * knows about itself, and written back. It is the same generator new rows use, so a
+         * backfilled id is indistinguishable from a fresh one and fingerprints the same file the
+         * same way.
+         *
+         * The time in a backfilled id is the row's own: an item's createdAt, a file state's
+         * updatedAt. Neither is a lie, and both keep the ids sorting in the order the rows were
+         * actually made. Where there is no usable time — a file_review_state row created by the
+         * V8 migration, which had none to record and stored 0 — the migration's own clock stands
+         * in, which is honest in its own way: that is when the row first became something the
+         * outside world could name.
+         */
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(connection: SQLiteConnection) {
+                val now = System.currentTimeMillis()
+
+                connection.execSQL(
+                    "ALTER TABLE list_items ADD COLUMN publicId TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE file_review_state ADD COLUMN publicId TEXT NOT NULL DEFAULT ''"
+                )
+
+                backfill(
+                    connection = connection,
+                    read = "SELECT id, listId, title, rootRelativePath, createdAt FROM list_items",
+                    update = "UPDATE list_items SET publicId = ? WHERE id = ?"
+                ) { row ->
+                    newItemPublicId(
+                        itemIdentityOf(
+                            rootRelativePath = if (row.isNull(3)) null else row.getText(3),
+                            listId = row.getLong(1),
+                            title = row.getText(2)
+                        ),
+                        row.getLong(4).takeIf { it > 0 } ?: now
+                    )
+                }
+
+                backfill(
+                    connection = connection,
+                    read = "SELECT id, relativePath, updatedAt FROM file_review_state",
+                    update = "UPDATE file_review_state SET publicId = ? WHERE id = ?"
+                ) { row ->
+                    newItemPublicId(
+                        fileIdentity(row.getText(1)),
+                        row.getLong(2).takeIf { it > 0 } ?: now
+                    )
+                }
+            }
+        }
+
+        /**
+         * Reads every row [read] returns, computes an id for it, and writes that id back.
+         *
+         * The whole read is drained into memory before a single update goes out. Stepping a
+         * cursor over a table while updating that same table is the kind of thing SQLite is
+         * entitled to have an opinion about, and an item table is thousands of rows, not
+         * millions. [id] is expected to be the first column of [read].
+         */
+        private fun backfill(
+            connection: SQLiteConnection,
+            read: String,
+            update: String,
+            assign: (SQLiteStatement) -> String
+        ) {
+            val assigned = mutableListOf<Pair<Long, String>>()
+            connection.prepare(read).use { row ->
+                while (row.step()) assigned += row.getLong(0) to assign(row)
+            }
+            connection.prepare(update).use { write ->
+                for ((rowId, publicId) in assigned) {
+                    write.bindText(1, publicId)
+                    write.bindLong(2, rowId)
+                    write.step()
+                    write.reset()
+                }
+            }
+        }
+
         @Volatile
         private var instance: ListeaDatabase? = null
 
@@ -206,7 +295,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_5_6,
                     MIGRATION_6_7,
                     MIGRATION_7_8,
-                    MIGRATION_8_9
+                    MIGRATION_8_9,
+                    MIGRATION_9_10
                 )
                     .build()
                     .also { instance = it }

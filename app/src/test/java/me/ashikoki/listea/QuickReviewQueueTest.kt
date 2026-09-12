@@ -2,6 +2,8 @@ package me.ashikoki.listea
 
 import me.ashikoki.listea.data.DecisionTarget
 import me.ashikoki.listea.data.FileReviewStateEntity
+import me.ashikoki.listea.data.fileIdentity
+import me.ashikoki.listea.data.newItemPublicId
 import me.ashikoki.listea.data.ReviewItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -40,6 +42,7 @@ class QuickReviewQueueTest {
         favorite: Boolean = false
     ) = FileReviewStateEntity(
         id = id,
+        publicId = newItemPublicId(fileIdentity(path), now = id),
         rootUri = root,
         relativePath = path,
         isCompleted = completed,

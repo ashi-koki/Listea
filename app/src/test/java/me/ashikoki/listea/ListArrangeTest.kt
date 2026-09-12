@@ -1,9 +1,12 @@
 package me.ashikoki.listea
 
 import me.ashikoki.listea.data.DecisionTarget
+import me.ashikoki.listea.data.fileIdentity
 import me.ashikoki.listea.data.ListDetail
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
+import me.ashikoki.listea.data.manualItemIdentity
+import me.ashikoki.listea.data.newItemPublicId
 import me.ashikoki.listea.data.ReviewDecisions
 import me.ashikoki.listea.data.ReviewItem
 import me.ashikoki.listea.data.toReviewItem
@@ -40,6 +43,7 @@ class ListArrangeTest {
         val id = nextId++
         return ListItemEntity(
             id = id,
+            publicId = newItemPublicId(fileIdentity("folder/$name"), now = id),
             listId = 1,
             title = name,
             isCompleted = completed,
@@ -62,6 +66,7 @@ class ListArrangeTest {
         val id = nextId++
         return ReviewItem(
             id = id,
+            publicId = newItemPublicId(manualItemIdentity(1, name), now = id),
             title = name,
             sourceUri = null,
             relativePath = null,

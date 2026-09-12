@@ -223,6 +223,12 @@ fun buildWebhookPayload(
  * says the item was processed in Listea, `actions` says what downstream automation should do with
  * it, and neither implies the other. Check/uncheck is never an action.
  *
+ * `id` is the item's public id and never its row id — a string, unique across reinstalls and
+ * across both review modes, and in an order that sorts by when the item arrived. See
+ * [me.ashikoki.listea.data.newItemPublicId] for what that is worth and what it is made of. The
+ * row id is not on the wire at all: it was only ever meaningful inside this one database, and
+ * sending it invited a receiver to key on it.
+ *
  * Action wire values come from [settings] as they stand right now, not from whatever they were
  * when the user tapped the chip.
  */
@@ -230,7 +236,7 @@ private fun itemJson(list: ListEntity, item: ListItemEntity, settings: AppSettin
     val actions = JSONArray()
     itemActionNames(item.decisions, settings).forEach { actions.put(it) }
     return JSONObject()
-        .put("id", item.id)
+        .put("id", item.publicId)
         .put("title", item.title)
         .put("isCompleted", item.isCompleted)
         .put("relativePath", webhookRelativePath(list, item) ?: JSONObject.NULL)

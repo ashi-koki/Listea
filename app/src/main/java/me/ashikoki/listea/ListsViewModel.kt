@@ -26,12 +26,14 @@ import kotlinx.coroutines.withContext
 import me.ashikoki.listea.data.DecisionTarget
 import me.ashikoki.listea.data.FileReviewStateEntity
 import me.ashikoki.listea.data.FolderDiff
+import me.ashikoki.listea.data.fileIdentity
 import me.ashikoki.listea.data.ItemAction
 import me.ashikoki.listea.data.ListDetail
 import me.ashikoki.listea.data.ListEntity
 import me.ashikoki.listea.data.ListItemEntity
 import me.ashikoki.listea.data.ListSummary
 import me.ashikoki.listea.data.ListeaDatabase
+import me.ashikoki.listea.data.newItemPublicId
 import me.ashikoki.listea.data.ReviewItem
 import me.ashikoki.listea.data.ScannedFile
 import me.ashikoki.listea.data.decisions
@@ -366,7 +368,15 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         val paths = files.map { it.rootRelativePath }
         dao.registerFiles(
             paths.map {
-                FileReviewStateEntity(rootUri = rootUri, relativePath = it, updatedAt = now())
+                FileReviewStateEntity(
+                    // Generated per resolution but kept only on the first, because registerFiles
+                    // ignores conflicts: a file's id is assigned the first time Listea sees it
+                    // under this root and is not renewed by later visits to the same folder.
+                    publicId = newItemPublicId(fileIdentity(it), now()),
+                    rootUri = rootUri,
+                    relativePath = it,
+                    updatedAt = now()
+                )
             }
         )
         // Reading them is proof they are there, which un-flags anything deleted and put back.
@@ -1003,6 +1013,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun ReviewItem.toPayloadRow(sortOrder: Int) = ListItemEntity(
         id = id,
+        publicId = publicId,
         listId = 0,
         title = title,
         isCompleted = decisions.isCompleted,

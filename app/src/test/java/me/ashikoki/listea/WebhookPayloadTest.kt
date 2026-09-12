@@ -28,6 +28,7 @@ class WebhookPayloadTest {
         custom2: Boolean = false
     ) = ListItemEntity(
         id = 173,
+        publicId = "0AT9K3QWMB-4H7ZP2-XC5N0V",
         listId = 1,
         title = "example.jpg",
         sortOrder = 0,

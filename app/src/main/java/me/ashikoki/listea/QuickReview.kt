@@ -84,6 +84,9 @@ fun folderReviewQueue(
         val state = byPath[file.rootRelativePath] ?: return@mapNotNull null
         ReviewItem(
             id = state.id,
+            // Off the registration row, not made here: a folder round's payload has to name a
+            // file the same way every time it reports on it.
+            publicId = state.publicId,
             title = file.name,
             sourceUri = file.uri,
             // Relative to the folder being reviewed, which for a direct file is its own name.
