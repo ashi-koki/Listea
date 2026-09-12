@@ -105,7 +105,9 @@ fun FileViewerScreen(
  *
  * Size and modified time are already on the [FolderEntry] the folder listing produced, so this
  * shows them immediately and lets the one provider lookup fill in the MIME type when it lands.
- * Nothing here can change anything: the Viewer never touches list state.
+ * Nothing here can change anything about the *list* state — Save is the one exception, and it
+ * changes nothing about the file either: it copies it into Listea's gallery album and leaves the
+ * original where the folder browser found it.
  */
 @Composable
 private fun FileInfoSheet(entry: FolderEntry, folderPath: String, onDismiss: () -> Unit) {
@@ -126,6 +128,7 @@ private fun FileInfoSheet(entry: FolderEntry, folderPath: String, onDismiss: () 
                     fallbackModified = entry.lastModified
                 )
             )
-        }
+        },
+        footer = { MediaFileActions(sourceUri = uri, name = entry.name) }
     )
 }

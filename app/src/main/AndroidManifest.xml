@@ -5,6 +5,17 @@
     <!-- Sending the optional list-completion webhook. Not a runtime permission. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+      Saving a reviewed file into Listea's own gallery album, on Android 9 and below only. From
+      Android 10 an app writes its own media into the shared collections through MediaStore with
+      no permission at all, so the declaration stops at 28 rather than asking newer devices for a
+      grant they would never be consulted about. Requested at the moment of the first save, not at
+      launch: everything else in Listea works without it.
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -40,6 +51,27 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          Sharing a reviewed file with another app. The file itself is a SAF document belonging to
+          somebody else's provider, and handing that URI out directly works only for receivers
+          willing to read through a foreign provider — so Listea stages a copy in its own cache and
+          hands out that instead, through this. See MediaShare.kt.
+
+          exported=false and grantUriPermissions=true is the whole security model: nothing can
+          reach a staged copy by asking, only by being given the one-off read grant that rides on
+          the share intent. The authority is the package plus ShareProviderSuffix; the two are
+          written out in full in both places because a mismatch fails at the moment of sharing.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/share_paths" />
+        </provider>
     </application>
 
 </manifest>

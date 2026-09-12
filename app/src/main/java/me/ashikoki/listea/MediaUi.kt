@@ -1,8 +1,11 @@
 package me.ashikoki.listea
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -31,15 +34,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.SaveAlt
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -50,11 +57,13 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
@@ -68,6 +77,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.ashikoki.listea.data.ItemAction
 import me.ashikoki.listea.data.ReviewItem
@@ -278,7 +288,7 @@ fun MediaSystemBars(chromeVisible: Boolean) {
     }
 }
 
-private tailrec fun Context.findActivity(): Activity? = when (this) {
+internal tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
@@ -461,10 +471,20 @@ data class InfoField(val label: String, val value: String)
  * [rows] are built by the caller. The File Viewer has no list, no completion and no actions, and
  * builds four rows about a file; Review builds rather more. Neither is handed the other's fields
  * to leave blank.
+ *
+ * [footer] is where the sheet stops describing and starts offering — currently [MediaFileActions]
+ * and nothing else. It sits below the last row rather than beside the title because a control
+ * that copies a file is not a fact about it, and putting it at the end means reaching it is a
+ * deliberate scroll past everything the sheet had to say.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ItemInfoSheet(title: String, rows: List<InfoField>, onDismiss: () -> Unit) {
+fun ItemInfoSheet(
+    title: String,
+    rows: List<InfoField>,
+    onDismiss: () -> Unit,
+    footer: (@Composable () -> Unit)? = null
+) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
@@ -488,6 +508,135 @@ fun ItemInfoSheet(title: String, rows: List<InfoField>, onDismiss: () -> Unit) {
                 Text(row.value, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(ListeaDimens.RowGap))
             }
+            footer?.let {
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                it()
+            }
+        }
+    }
+}
+
+/**
+ * The two things every Info sheet ends with: keep a copy of this file, or hand it to something
+ * else — and one line under whichever of them last had something to say.
+ *
+ * Shared by all three review surfaces — Full Review, Quick Review and the plain viewers — because
+ * the offer is the same in each: whatever you are looking at, this is what can be done with the
+ * file itself. Neither control is wired to the action chips. Both take effect immediately and by
+ * themselves, with no list, no tag and no webhook involved, which is what keeps them available on
+ * the read-only viewers that have no chips at all.
+ *
+ * Save leads because it is the one with a destination Listea controls and can report on. Share
+ * ends at a chooser full of apps this code has never heard of, so it is the quieter of the two
+ * and says nothing at all when it works — see [shareOutcomeMessage].
+ *
+ * Both states are keyed on [sourceUri], so paging to the next item in a sheet that stayed open
+ * resets them rather than leaving the previous file's "Saved" under the new file's name.
+ *
+ * The permission launcher is only ever used below Android 10; see [needsLegacyStoragePermission].
+ * Saving is driven from a token the click bumps rather than from the click itself, because the
+ * permission result has to reach the same code path the direct click does, and a launcher
+ * callback cannot call a function declared after it. Sharing needs none of that — it writes only
+ * inside Listea's own cache — so it runs straight off the click.
+ */
+@Composable
+fun MediaFileActions(sourceUri: String, name: String) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var runToken by remember(sourceUri) { mutableStateOf(0) }
+    var saving by remember(sourceUri) { mutableStateOf(false) }
+    var outcome by remember(sourceUri) { mutableStateOf<SaveToAlbumResult?>(null) }
+
+    var sharing by remember(sourceUri) { mutableStateOf(false) }
+    var shareOutcome by remember(sourceUri) { mutableStateOf<ShareResult?>(null) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) runToken++ else outcome = SaveToAlbumResult.PermissionDenied
+    }
+
+    LaunchedEffect(sourceUri, runToken) {
+        if (runToken == 0) return@LaunchedEffect
+        saving = true
+        outcome = saveToListeaAlbum(context, sourceUri, name)
+        saving = false
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Wraps rather than shrinking either button: a long album name and a translated Share
+        // label can outgrow a narrow sheet, and a clipped button is worse than a second line.
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)) {
+            FilledTonalButton(
+                onClick = {
+                    outcome = null
+                    if (needsLegacyStoragePermission(context)) {
+                        permissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    } else {
+                        runToken++
+                    }
+                },
+                // Re-saving is harmless — it reports "already there" — but the button is still
+                // held while a copy is in flight, so a double tap cannot start a second one.
+                enabled = !saving
+            ) {
+                Icon(
+                    Icons.Outlined.SaveAlt,
+                    contentDescription = null,
+                    modifier = Modifier.size(ListeaDimens.IconSize)
+                )
+                Spacer(Modifier.width(ListeaDimens.RowGap))
+                Text(if (saving) "Saving…" else "Save to $ListeaAlbumName")
+            }
+
+            OutlinedButton(
+                onClick = {
+                    shareOutcome = null
+                    sharing = true
+                    scope.launch {
+                        shareOutcome = shareMediaFile(context, sourceUri, name)
+                        sharing = false
+                    }
+                },
+                // Held for the copy, which is the part that takes any time. Once the chooser is
+                // up the button is live again: sharing the same file twice is a normal thing to
+                // want and costs nothing but the same copy written again.
+                enabled = !sharing
+            ) {
+                Icon(
+                    Icons.Outlined.Share,
+                    contentDescription = null,
+                    modifier = Modifier.size(ListeaDimens.IconSize)
+                )
+                Spacer(Modifier.width(ListeaDimens.RowGap))
+                Text(if (sharing) "Preparing…" else "Share")
+            }
+        }
+
+        outcome?.let { result ->
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
+            Text(
+                saveOutcomeMessage(result),
+                style = MaterialTheme.typography.bodySmall,
+                color = when (result) {
+                    is SaveToAlbumResult.Saved -> MaterialTheme.colorScheme.primary
+                    is SaveToAlbumResult.AlreadySaved ->
+                        MaterialTheme.colorScheme.onSurfaceVariant
+
+                    else -> MaterialTheme.colorScheme.error
+                }
+            )
+        }
+        // Only ever a problem: a share that opened the chooser has already said so, on screen and
+        // more loudly than a line of text could.
+        shareOutcome?.let(::shareOutcomeMessage)?.let { message ->
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
         }
     }
 }

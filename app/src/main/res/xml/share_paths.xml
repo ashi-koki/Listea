@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The one directory Listea will hand out through its FileProvider: the share staging area inside
+  its own cache, and nothing else.
+
+  Deliberately narrow. A provider path is a standing offer to any app that asks with a valid
+  grant, so it names the exact subdirectory MediaShare writes copies into rather than the whole
+  cache — the database, the DataStore file and every image the loader has cached are none of a
+  messenger's business.
+-->
+<paths>
+    <cache-path name="shared" path="shared/" />
+</paths>

@@ -520,8 +520,13 @@ fun ReviewSession(
  * the sheet is open — never per card and never while swiping.
  *
  * Shared with [ListItemViewerScreen], which shows the same items without being able to change
- * them. Nothing in here writes anything, so a read-only screen can say exactly as much about an
- * item as Review can.
+ * them. Nothing in here writes to the *item*, so a read-only screen can say exactly as much about
+ * one as Review can — and can offer the same Save, which copies the file into Listea's gallery
+ * album without touching the item, its completion or its actions.
+ *
+ * Save is offered only when there is a file to copy: a manual item has no source at all, and one
+ * whose source has gone missing has a URI that no longer resolves. Both say so in a row above
+ * instead of showing a button that could only fail.
  */
 @Composable
 fun ReviewItemInfoSheet(info: ReviewItemInfo, onDismiss: () -> Unit) {
@@ -544,7 +549,10 @@ fun ReviewItemInfoSheet(info: ReviewItemInfo, onDismiss: () -> Unit) {
                     add(InfoField("Source", "Missing from the source folder"))
             }
             addAll(mediaFactRows(facts, info.title))
-        }
+        },
+        footer = info.sourceUri
+            ?.takeIf { !info.sourceMissing }
+            ?.let { uri -> { MediaFileActions(sourceUri = uri, name = info.title) } }
     )
 }
 
